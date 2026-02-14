@@ -1,0 +1,13 @@
+fev>=0.7.0
+datasets>=2.19.0
+pandas>=2.1.0
+numpy>=1.24.0
+statsforecast>=1.7.0
+pyarrow>=15.0.0
+scikit-learn>=1.4.0
+matplotlib>=3.8.0
+
+# Chronos-2 support:
+torch>=2.2.0
+chronos-forecasting>=0.4.0
+# autogluon.timeseries>=1.4.0
