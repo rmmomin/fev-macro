@@ -82,6 +82,11 @@ def _make_synthetic_release_table() -> pd.DataFrame:
 
     y_prev = df["first_release"].shift(1)
     df["g_true_saar_first"] = [to_saar_growth(c, p) for c, p in zip(df["first_release"], y_prev)]
+    df["qoq_saar_growth_realtime_first_pct"] = df["g_true_saar_first"]
+    y_prev_second = df["second_release"].shift(1)
+    y_prev_third = df["third_release"].shift(1)
+    df["qoq_saar_growth_realtime_second_pct"] = [to_saar_growth(c, p) for c, p in zip(df["second_release"], y_prev_second)]
+    df["qoq_saar_growth_realtime_third_pct"] = [to_saar_growth(c, p) for c, p in zip(df["third_release"], y_prev_third)]
     return df
 
 
@@ -176,6 +181,31 @@ def test_run_backtest_respects_min_target_quarter_filter() -> None:
     assert not preds.empty
     min_target = min(pd.Period(q, freq="Q-DEC") for q in preds["target_quarter"].astype(str))
     assert min_target >= pd.Period("2022Q1", freq="Q-DEC")
+
+
+def test_run_backtest_prefers_realtime_saar_truth_columns() -> None:
+    release = _make_synthetic_release_table()
+    panel = _make_synthetic_vintage_panel(release)
+
+    # Force a distinctive truth signal that differs from level-derived growth.
+    release.loc[release["quarter"] >= pd.Period("2020Q2", freq="Q-DEC"), "qoq_saar_growth_realtime_first_pct"] = 9.99
+
+    preds = run_backtest(
+        models=["naive_last"],
+        release_table=release,
+        vintage_panel=panel,
+        horizons=[1],
+        target_col="GDPC1",
+        origin_schedule="quarterly",
+        release_stages=["first"],
+        max_origins=6,
+        min_train_observations=4,
+    )
+
+    assert not preds.empty
+    finite_truth = preds["g_true_saar"].dropna().to_numpy(dtype=float)
+    assert finite_truth.size > 0
+    assert np.allclose(finite_truth, 9.99)
 
 
 def test_train_df_to_datasets_builds_ragged_edge_future_covariates() -> None:

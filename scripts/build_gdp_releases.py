@@ -23,6 +23,7 @@ import pandas as pd
 import requests
 
 ALFRED_HOST = "https://alfred.stlouisfed.org"
+DEFAULT_QD_VINTAGE_PANEL_PATH = "data/panels/fred_qd_vintage_panel.parquet"
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,6 +59,14 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=180,
         help="HTTP timeout in seconds for requests (default: 180).",
+    )
+    parser.add_argument(
+        "--vintage_panel_path",
+        default=DEFAULT_QD_VINTAGE_PANEL_PATH,
+        help=(
+            "Path to FRED-QD vintage panel parquet used to compute realtime q/q SAAR growth "
+            "from as-of GDPC1 levels."
+        ),
     )
     return parser.parse_args()
 
@@ -153,25 +162,165 @@ def _extract_vintage_date_from_col(col: str, series: str) -> pd.Timestamp | None
     return pd.to_datetime(match.group(1), format="%Y%m%d", errors="coerce")
 
 
-def _compute_saar_growth(current_level: float, previous_level: float) -> float:
-    if not np.isfinite(current_level) or not np.isfinite(previous_level):
-        return float("nan")
-    if current_level <= 0 or previous_level <= 0:
-        return float("nan")
-    return float(100.0 * ((current_level / previous_level) ** 4 - 1.0))
+def load_qd_vintage_series_panel(panel_path: str | Path, series: str) -> pd.DataFrame:
+    panel_path = Path(panel_path).expanduser().resolve()
+    if not panel_path.exists():
+        raise FileNotFoundError(
+            "QD vintage panel not found: "
+            f"{panel_path}. Build it with `make panel-qd` or provide --vintage_panel_path."
+        )
+
+    panel = pd.read_parquet(panel_path)
+    required = {"vintage", "vintage_timestamp", "timestamp", series}
+    missing = sorted(required.difference(panel.columns))
+    if missing:
+        raise ValueError(f"QD vintage panel missing required columns {missing}: {panel_path}")
+
+    out = panel[["vintage", "timestamp", series, "vintage_timestamp"]].copy()
+    out["vintage"] = out["vintage"].astype(str)
+    out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
+    out["value"] = pd.to_numeric(out[series], errors="coerce")
+    out["vintage_timestamp"] = pd.to_datetime(out["vintage_timestamp"], errors="coerce")
+    out["quarter"] = pd.PeriodIndex(out["timestamp"], freq="Q-DEC")
+    out["quarter_ord"] = out["quarter"].astype("int64")
+
+    out = out.dropna(subset=["timestamp", "vintage", "value", "vintage_timestamp"]).copy()
+    out = out.sort_values(["vintage_timestamp", "vintage", "timestamp"]).reset_index(drop=True)
+    out = out.drop_duplicates(subset=["vintage_timestamp", "quarter_ord"], keep="last")
+    return out[["vintage", "vintage_timestamp", "quarter", "quarter_ord", "value"]]
 
 
-def _latest_available_asof(row: np.ndarray, upto_idx: int) -> float:
-    if upto_idx < 0:
-        return float("nan")
-    upto = row[: upto_idx + 1]
-    valid_idx = np.flatnonzero(~np.isnan(upto))
-    if valid_idx.size == 0:
-        return float("nan")
-    return float(upto[int(valid_idx[-1])])
+def _compute_realtime_saar_from_panel(
+    out: pd.DataFrame,
+    qd_panel: pd.DataFrame,
+) -> pd.DataFrame:
+    if qd_panel.empty:
+        out["qoq_growth_realtime_first_pct"] = np.nan
+        out["qoq_growth_realtime_second_pct"] = np.nan
+        out["qoq_growth_realtime_third_pct"] = np.nan
+        out["qoq_saar_growth_realtime_first_pct"] = np.nan
+        out["qoq_saar_growth_realtime_second_pct"] = np.nan
+        out["qoq_saar_growth_realtime_third_pct"] = np.nan
+        return out
+
+    release_long = out[
+        [
+            "observation_date",
+            "first_release_date",
+            "second_release_date",
+            "third_release_date",
+        ]
+    ].copy()
+    release_long = release_long.melt(
+        id_vars=["observation_date"],
+        value_vars=["first_release_date", "second_release_date", "third_release_date"],
+        var_name="release_stage_col",
+        value_name="asof_date",
+    )
+    stage_map = {
+        "first_release_date": "first",
+        "second_release_date": "second",
+        "third_release_date": "third",
+    }
+    release_long["stage"] = release_long["release_stage_col"].map(stage_map)
+    release_long["observation_date"] = pd.to_datetime(release_long["observation_date"], errors="coerce")
+    release_long["asof_date"] = pd.to_datetime(release_long["asof_date"], errors="coerce")
+    release_long["quarter"] = pd.PeriodIndex(release_long["observation_date"], freq="Q-DEC")
+    release_long["quarter_ord"] = release_long["quarter"].astype("int64")
+    release_long["prev_quarter_ord"] = release_long["quarter_ord"] - 1
+    release_long = release_long.sort_values("asof_date").reset_index(drop=True)
+
+    vintage_calendar = (
+        qd_panel[["vintage_timestamp"]]
+        .drop_duplicates()
+        .sort_values("vintage_timestamp")
+        .reset_index(drop=True)
+    )
+    release_long_valid = release_long.loc[release_long["asof_date"].notna()].copy()
+    release_long_missing = release_long.loc[release_long["asof_date"].isna()].copy()
+    release_long_missing["vintage_timestamp"] = pd.NaT
+
+    if not release_long_valid.empty:
+        release_long_valid = pd.merge_asof(
+            release_long_valid,
+            vintage_calendar,
+            left_on="asof_date",
+            right_on="vintage_timestamp",
+            direction="backward",
+        )
+
+    release_long = pd.concat([release_long_valid, release_long_missing], axis=0, ignore_index=True)
+
+    panel_cur = qd_panel[["vintage_timestamp", "quarter_ord", "value"]].rename(columns={"value": "y_q"})
+    release_long = release_long.merge(
+        panel_cur,
+        on=["vintage_timestamp", "quarter_ord"],
+        how="left",
+    )
+
+    panel_prev = qd_panel[["vintage_timestamp", "quarter_ord", "value"]].rename(
+        columns={"quarter_ord": "prev_quarter_ord", "value": "y_qm1"}
+    )
+    release_long = release_long.merge(
+        panel_prev,
+        on=["vintage_timestamp", "prev_quarter_ord"],
+        how="left",
+    )
+
+    valid = (
+        release_long["asof_date"].notna()
+        & release_long["vintage_timestamp"].notna()
+        & release_long["y_q"].notna()
+        & release_long["y_qm1"].notna()
+        & np.isfinite(release_long["y_q"])
+        & np.isfinite(release_long["y_qm1"])
+        & (release_long["y_q"] > 0)
+        & (release_long["y_qm1"] > 0)
+    )
+    ratio = release_long["y_q"] / release_long["y_qm1"]
+    release_long["qoq_growth_pct"] = np.where(valid, (ratio - 1.0) * 100.0, np.nan)
+    release_long["qoq_saar_growth_pct"] = np.where(valid, (ratio.pow(4) - 1.0) * 100.0, np.nan)
+
+    qoq_pivot = (
+        release_long.pivot_table(index="observation_date", columns="stage", values="qoq_growth_pct", aggfunc="first")
+        .rename(
+            columns={
+                "first": "qoq_growth_realtime_first_pct",
+                "second": "qoq_growth_realtime_second_pct",
+                "third": "qoq_growth_realtime_third_pct",
+            }
+        )
+        .reset_index()
+    )
+    saar_pivot = (
+        release_long.pivot_table(index="observation_date", columns="stage", values="qoq_saar_growth_pct", aggfunc="first")
+        .rename(
+            columns={
+                "first": "qoq_saar_growth_realtime_first_pct",
+                "second": "qoq_saar_growth_realtime_second_pct",
+                "third": "qoq_saar_growth_realtime_third_pct",
+            }
+        )
+        .reset_index()
+    )
+
+    out = out.merge(qoq_pivot, on="observation_date", how="left")
+    out = out.merge(saar_pivot, on="observation_date", how="left")
+
+    for col in [
+        "qoq_growth_realtime_first_pct",
+        "qoq_growth_realtime_second_pct",
+        "qoq_growth_realtime_third_pct",
+        "qoq_saar_growth_realtime_first_pct",
+        "qoq_saar_growth_realtime_second_pct",
+        "qoq_saar_growth_realtime_third_pct",
+    ]:
+        if col not in out.columns:
+            out[col] = np.nan
+    return out
 
 
-def build_release_dataset(wide: pd.DataFrame, series: str) -> pd.DataFrame:
+def build_release_dataset(wide: pd.DataFrame, series: str, qd_panel: pd.DataFrame | None = None) -> pd.DataFrame:
     vintage_cols: list[str] = []
     vintage_ts: list[pd.Timestamp] = []
 
@@ -196,9 +345,6 @@ def build_release_dataset(wide: pd.DataFrame, series: str) -> pd.DataFrame:
     second_val = np.full(n, np.nan)
     third_val = np.full(n, np.nan)
     latest_val = np.full(n, np.nan)
-    first_idx = np.full(n, -1, dtype=int)
-    second_idx = np.full(n, -1, dtype=int)
-    third_idx = np.full(n, -1, dtype=int)
 
     first_date = np.full(n, np.datetime64("NaT"), dtype="datetime64[ns]")
     second_date = np.full(n, np.datetime64("NaT"), dtype="datetime64[ns]")
@@ -212,19 +358,16 @@ def build_release_dataset(wide: pd.DataFrame, series: str) -> pd.DataFrame:
             continue
 
         i1 = int(valid_idx[0])
-        first_idx[i] = i1
         first_val[i] = row[i1]
         first_date[i] = np.datetime64(vintage_ts[i1])
 
         if valid_idx.size >= 2:
             i2 = int(valid_idx[1])
-            second_idx[i] = i2
             second_val[i] = row[i2]
             second_date[i] = np.datetime64(vintage_ts[i2])
 
         if valid_idx.size >= 3:
             i3 = int(valid_idx[2])
-            third_idx[i] = i3
             third_val[i] = row[i3]
             third_date[i] = np.datetime64(vintage_ts[i3])
 
@@ -253,30 +396,17 @@ def build_release_dataset(wide: pd.DataFrame, series: str) -> pd.DataFrame:
     out["qoq_growth_latest_pct"] = (ratio - 1.0) * 100.0
     out["qoq_saar_growth_latest_pct"] = (ratio.pow(4) - 1.0) * 100.0
 
-    # Realtime growth: compare current-quarter release level with previous-quarter
-    # level as-of the same release vintage date.
-    qoq_saar_growth_realtime_first_pct = np.full(n, np.nan)
-    qoq_saar_growth_realtime_second_pct = np.full(n, np.nan)
-    qoq_saar_growth_realtime_third_pct = np.full(n, np.nan)
-
-    for i in range(1, n):
-        prev_row = values[i - 1, :]
-
-        if first_idx[i] >= 0:
-            prev_level_first = _latest_available_asof(prev_row, int(first_idx[i]))
-            qoq_saar_growth_realtime_first_pct[i] = _compute_saar_growth(first_val[i], prev_level_first)
-
-        if second_idx[i] >= 0:
-            prev_level_second = _latest_available_asof(prev_row, int(second_idx[i]))
-            qoq_saar_growth_realtime_second_pct[i] = _compute_saar_growth(second_val[i], prev_level_second)
-
-        if third_idx[i] >= 0:
-            prev_level_third = _latest_available_asof(prev_row, int(third_idx[i]))
-            qoq_saar_growth_realtime_third_pct[i] = _compute_saar_growth(third_val[i], prev_level_third)
-
-    out["qoq_saar_growth_realtime_first_pct"] = qoq_saar_growth_realtime_first_pct
-    out["qoq_saar_growth_realtime_second_pct"] = qoq_saar_growth_realtime_second_pct
-    out["qoq_saar_growth_realtime_third_pct"] = qoq_saar_growth_realtime_third_pct
+    # Realtime growth uses GDPC1 levels from the selected as-of vintage panel
+    # to avoid mixing vintages around level breaks.
+    if qd_panel is None:
+        out["qoq_growth_realtime_first_pct"] = np.nan
+        out["qoq_growth_realtime_second_pct"] = np.nan
+        out["qoq_growth_realtime_third_pct"] = np.nan
+        out["qoq_saar_growth_realtime_first_pct"] = np.nan
+        out["qoq_saar_growth_realtime_second_pct"] = np.nan
+        out["qoq_saar_growth_realtime_third_pct"] = np.nan
+    else:
+        out = _compute_realtime_saar_from_panel(out=out, qd_panel=qd_panel)
 
     # Gaps make vintage-history limitations explicit (e.g., very old observations).
     out["first_release_lag_days"] = (out["first_release_date"] - out["observation_date"]).dt.days
@@ -323,7 +453,9 @@ def main() -> int:
         )
 
     wide = load_wide_vintage_csv(zip_bytes)
-    releases = build_release_dataset(wide=wide, series=series)
+    print(f"Loading QD vintage panel: {args.vintage_panel_path}")
+    qd_panel = load_qd_vintage_series_panel(panel_path=args.vintage_panel_path, series=series)
+    releases = build_release_dataset(wide=wide, series=series, qd_panel=qd_panel)
 
     releases.to_csv(out_csv, index=False)
     print(f"Wrote CSV: {out_csv} ({len(releases)} rows)")

@@ -23,6 +23,11 @@ RELEASE_STAGE_TO_COL = {
     "second": "second_release",
     "third": "third_release",
 }
+RELEASE_STAGE_TO_REALTIME_SAAR_COL = {
+    "first": "qoq_saar_growth_realtime_first_pct",
+    "second": "qoq_saar_growth_realtime_second_pct",
+    "third": "qoq_saar_growth_realtime_third_pct",
+}
 
 PREFERRED_MD_COVARIATES: tuple[str, ...] = (
     "UNRATE",
@@ -164,9 +169,18 @@ def load_release_table(
 
     df = df.sort_values("quarter").reset_index(drop=True)
 
-    y = df["first_release"].astype(float)
-    y_prev = y.shift(1)
-    df["g_true_saar_first"] = [to_saar_growth(c, p) for c, p in zip(y, y_prev)]
+    realtime_first_col = RELEASE_STAGE_TO_REALTIME_SAAR_COL["first"]
+    if realtime_first_col in df.columns:
+        df["g_true_saar_first"] = pd.to_numeric(df[realtime_first_col], errors="coerce")
+    else:
+        print(
+            "WARNING: release table is missing "
+            f"'{realtime_first_col}'. Falling back to first_release.shift(1) for g_true_saar_first, "
+            "which may be inconsistent around reindex/rebenchmark events."
+        )
+        y = df["first_release"].astype(float)
+        y_prev = y.shift(1)
+        df["g_true_saar_first"] = [to_saar_growth(c, p) for c, p in zip(y, y_prev)]
 
     valid_origin = (
         df["first_release_date"].notna()
@@ -1369,12 +1383,32 @@ def run_backtest(
     releases = release_table.sort_values("quarter").reset_index(drop=True)
     first_release_date_map = releases.set_index("quarter")["first_release_date"].to_dict()
     truth_maps: dict[str, dict[pd.Period, float]] = {}
+    truth_saar_maps: dict[str, dict[pd.Period, float]] = {}
     for stage in stage_list:
         col = RELEASE_STAGE_TO_COL[stage]
         if col not in releases.columns:
             raise ValueError(f"Release table missing required column for stage '{stage}': {col}")
         truth_df = releases.loc[releases[col].notna(), ["quarter", col]].copy()
         truth_maps[stage] = {pd.Period(q, freq="Q-DEC"): float(v) for q, v in zip(truth_df["quarter"], truth_df[col])}
+
+        realtime_col = RELEASE_STAGE_TO_REALTIME_SAAR_COL.get(stage)
+        if realtime_col and realtime_col in releases.columns:
+            saar_df = releases.loc[releases[realtime_col].notna(), ["quarter", realtime_col]].copy()
+            truth_saar_maps[stage] = {
+                pd.Period(q, freq="Q-DEC"): float(v) for q, v in zip(saar_df["quarter"], saar_df[realtime_col])
+            }
+        else:
+            if realtime_col:
+                print(
+                    "WARNING: release table is missing "
+                    f"'{realtime_col}'. Falling back to level-based g_true_saar for stage='{stage}', "
+                    "which may be inconsistent around reindex/rebenchmark events."
+                )
+            stage_map = truth_maps[stage]
+            truth_saar_maps[stage] = {
+                q: to_saar_growth(float(stage_map.get(q, np.nan)), float(stage_map.get(q - 1, np.nan)))
+                for q in stage_map
+            }
 
     vintage_calendar = build_vintage_calendar(vintage_panel)
     if origin_schedule == "quarterly":
@@ -1477,13 +1511,13 @@ def run_backtest(
 
                 y_true_first = truth_maps.get("first", {}).get(target_quarter, np.nan)
                 y_true_prev_first = truth_maps.get("first", {}).get(target_quarter - 1, np.nan)
-                g_true_first = to_saar_growth(float(y_true_first), float(y_true_prev_first))
+                g_true_first = truth_saar_maps.get("first", {}).get(target_quarter, np.nan)
 
                 for stage in stage_list:
                     stage_map = truth_maps[stage]
                     y_true = stage_map.get(target_quarter, np.nan)
                     y_true_prev = stage_map.get(target_quarter - 1, np.nan)
-                    g_true = to_saar_growth(float(y_true), float(y_true_prev))
+                    g_true = truth_saar_maps.get(stage, {}).get(target_quarter, np.nan)
                     log_true = float(np.log(y_true)) if np.isfinite(y_true) and y_true > 0 else float("nan")
 
                     rows.append(
