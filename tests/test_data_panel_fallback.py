@@ -15,6 +15,9 @@ from fev_macro.data import HistoricalQuarterlyVintageProvider
 
 
 def test_historical_provider_falls_back_to_qd_panel(tmp_path: Path) -> None:
+    missing_csv_dir = tmp_path / "missing_csv_vintages"
+    missing_csv_dir.mkdir(parents=True, exist_ok=True)
+
     panel_path = tmp_path / "panel.parquet"
     panel = pd.DataFrame(
         {
@@ -28,7 +31,7 @@ def test_historical_provider_falls_back_to_qd_panel(tmp_path: Path) -> None:
     panel.to_parquet(panel_path, index=False)
 
     provider = HistoricalQuarterlyVintageProvider(
-        historical_qd_dir=tmp_path / "missing_csv_vintages",
+        historical_qd_dir=missing_csv_dir,
         target_series_name="LOG_REAL_GDP",
         target_transform="log_level",
         include_covariates=True,

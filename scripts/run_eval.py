@@ -19,13 +19,10 @@ from fev_macro.data import (  # noqa: E402
     HistoricalQuarterlyVintageProvider,
     SUPPORTED_TARGET_TRANSFORMS,
     apply_gdpc1_release_truth_target,
+    build_release_target_scaffold,
     build_reindexed_to_actual_timestamp_map,
-    build_real_gdp_target_series,
     exclude_years,
     export_local_dataset_parquet,
-    find_gdp_column_candidates,
-    load_fred_qd_transform_codes,
-    load_fev_dataset,
     reindex_to_regular_frequency,
 )
 from fev_macro.eval import run_models_on_tasks, save_summaries  # noqa: E402
@@ -36,16 +33,13 @@ from fev_macro.tasks import make_gdp_tasks  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run reproducible macro-forecast eval harness (US real GDP).")
-    parser.add_argument("--dataset_path", type=str, default="autogluon/fev_datasets")
-    parser.add_argument("--dataset_config", type=str, default="fred_qd_2025")
-    parser.add_argument("--dataset_revision", type=str, default=None)
     parser.add_argument("--target", type=str, default=DEFAULT_TARGET_SERIES_NAME)
     parser.add_argument(
         "--target_transform",
         type=str,
         default="saar_growth",
         choices=sorted(SUPPORTED_TARGET_TRANSFORMS),
-        help="Target transform when target series is not directly available.",
+        help="Target transform used for model training targets.",
     )
     parser.add_argument("--horizons", type=int, nargs="+", default=[1, 2, 3, 4])
     parser.add_argument("--num_windows", type=int, default=100)
@@ -93,13 +87,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--disable_covariates",
         action="store_true",
-        help="If set, run univariate-only target forecasting without extra macro covariates.",
+        help="Kept for CLI compatibility; release-CSV-only mode currently uses univariate task datasets.",
     )
     parser.add_argument(
         "--source_series_candidates",
         nargs="+",
         default=list(DEFAULT_SOURCE_SERIES_CANDIDATES),
-        help="Candidate real-GDP level series IDs used when target series is absent.",
+        help="Candidate real-GDP level series IDs used in historical vintage reconstruction.",
     )
     parser.add_argument(
         "--historical_qd_dir",
@@ -122,17 +116,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--disable_fred_transforms",
-        action="store_true",
-        help="Disable FRED-MD/QD tcode transforms for covariates during dataset construction.",
-    )
-    parser.add_argument(
-        "--fred_transform_vintage",
-        type=str,
-        default=None,
-        help="Optional transform-code vintage month (YYYY-MM); default uses latest available historical vintage.",
-    )
-    parser.add_argument(
         "--vintage_fallback_to_earliest",
         action="store_true",
         help=(
@@ -141,23 +124,12 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--eval_truth_source",
-        type=str,
-        choices=["release_csv", "dataset"],
-        default="release_csv",
-        help=(
-            "Ground-truth source for future-window scoring. "
-            "'release_csv' uses gdpc1 release table columns; "
-            "'dataset' keeps the finalized HF target path."
-        ),
-    )
-    parser.add_argument(
         "--eval_release_metric",
         type=str,
         choices=["realtime_qoq_saar", "level"],
         default="realtime_qoq_saar",
         help=(
-            "Release-table column family used for truth when --eval_truth_source=release_csv. "
+            "Release-table column family used for truth. "
             "'realtime_qoq_saar' maps to qoq_saar_growth_realtime_{first,second,third}_pct."
         ),
     )
@@ -165,7 +137,7 @@ def parse_args() -> argparse.Namespace:
         "--eval_release_csv",
         type=str,
         default="data/panels/gdpc1_releases_first_second_third.csv",
-        help="Path to gdpc1 release table CSV used when --eval_truth_source=release_csv.",
+        help="Path to gdpc1 release table CSV used as the sole benchmark truth source.",
     )
     parser.add_argument(
         "--eval_release_stage",
@@ -218,72 +190,42 @@ def main() -> None:
     if unknown_models:
         raise ValueError(f"Unknown models: {unknown_models}. Available models: {available_models()}")
 
-    if args.eval_truth_source == "release_csv" and args.eval_release_metric == "realtime_qoq_saar":
-        if args.target_transform != "saar_growth":
-            raise ValueError(
-                "--eval_release_metric realtime_qoq_saar requires --target_transform saar_growth "
-                "to keep training targets and evaluation truth on the same scale."
-            )
+    if args.eval_release_metric == "realtime_qoq_saar" and args.target_transform != "saar_growth":
+        raise ValueError(
+            "--eval_release_metric realtime_qoq_saar requires --target_transform saar_growth "
+            "to keep training targets and evaluation truth on the same scale."
+        )
 
-    dataset = load_fev_dataset(
-        config=args.dataset_config,
-        dataset_path=args.dataset_path,
-        dataset_revision=args.dataset_revision,
-    )
-
-    apply_fred_transforms = not args.disable_fred_transforms
-    transform_vintage = pd.Period(args.fred_transform_vintage, freq="M") if args.fred_transform_vintage else None
-    fred_transform_codes: dict[str, int] = {}
-    if apply_fred_transforms:
-        try:
-            fred_transform_codes = load_fred_qd_transform_codes(
-                historical_qd_dir=args.historical_qd_dir,
-                vintage_period=transform_vintage,
-            )
-        except Exception as err:
-            print(f"Warning: unable to load FRED transform codes ({err}); continuing without transforms.")
-            apply_fred_transforms = False
-
-    candidates = find_gdp_column_candidates(dataset)
-    base_gdp_df, gdp_meta = build_real_gdp_target_series(
-        dataset=dataset,
+    base_gdp_df, base_meta = build_release_target_scaffold(
+        release_csv_path=args.eval_release_csv,
         target_series_name=args.target,
-        target_transform=args.target_transform,
-        source_series_candidates=args.source_series_candidates,
-        include_covariates=not args.disable_covariates,
-        apply_fred_transforms=apply_fred_transforms,
-        fred_transform_codes=fred_transform_codes,
     )
 
-    eval_datasets: list[dict[str, object]] = [{"label": "dataset", "df": base_gdp_df, "meta": {"source": "dataset"}}]
-    if args.eval_truth_source == "release_csv":
-        stages = _resolve_eval_release_stages(args)
-        eval_datasets = []
-        for stage in stages:
-            stage_df, stage_meta = apply_gdpc1_release_truth_target(
-                dataset_df=base_gdp_df,
-                release_csv_path=args.eval_release_csv,
-                release_stage=stage,
-                release_metric=args.eval_release_metric,
-                target_transform=args.target_transform,
-            )
-            eval_datasets.append({"label": stage, "df": stage_df, "meta": stage_meta})
+    stages = _resolve_eval_release_stages(args)
+    eval_datasets: list[dict[str, object]] = []
+    for stage in stages:
+        stage_df, stage_meta = apply_gdpc1_release_truth_target(
+            dataset_df=base_gdp_df,
+            release_csv_path=args.eval_release_csv,
+            release_stage=stage,
+            release_metric=args.eval_release_metric,
+            target_transform=args.target_transform,
+        )
+        eval_datasets.append({"label": stage, "df": stage_df, "meta": stage_meta})
 
-    covariate_columns = list(gdp_meta.get("covariate_columns", []))
+    covariate_columns: list[str] = []
     years_to_exclude = sorted({int(y) for y in (args.exclude_years or [])})
     results_dir = Path(args.results_dir)
 
-    print(f"Base dataset: {args.dataset_path} (config={args.dataset_config})")
-    print(f"Target series used: {gdp_meta['target_series']}")
-    print(f"Target transform: {gdp_meta.get('target_transform', args.target_transform)}")
-    print(f"Computed from level series: {gdp_meta['computed']} (source={gdp_meta['source_series']})")
-    print(f"GDP candidate IDs: {candidates['id_candidates'][:20]}")
+    print(f"Base release-table dataset: {base_meta['release_csv_path']} (rows={base_meta['rows']})")
+    print(f"Target series used: {args.target}")
+    print(f"Target transform: {args.target_transform}")
     print(f"Covariates enabled: {not args.disable_covariates}; count={len(covariate_columns)}")
-    print(
-        "FRED transforms enabled: "
-        f"{apply_fred_transforms}; transform codes loaded={len(fred_transform_codes)}; "
-        f"covariates transformed={len(gdp_meta.get('transformed_covariates', []))}"
-    )
+    if not args.disable_covariates:
+        print(
+            "Note: release-CSV-only benchmark mode currently builds univariate task datasets; "
+            "no static covariate scaffold is loaded from external datasets."
+        )
 
     all_tasks = []
     task_provider_by_name: dict[str, HistoricalQuarterlyVintageProvider] = {}
@@ -315,26 +257,19 @@ def main() -> None:
         local_dataset_path = results_dir / f"{args.target.lower()}_dataset{dataset_suffix}.parquet"
         export_local_dataset_parquet(gdp_df, output_path=local_dataset_path)
 
-        if eval_meta.get("source") == "gdpc1_release_csv":
-            print(
-                "Evaluation truth source"
-                f"{f' [{eval_label}]' if len(eval_datasets) > 1 else ''}: "
-                f"{eval_meta['source']} (metric={eval_meta.get('release_metric')}, "
-                f"stage={eval_meta.get('release_stage')}, column={eval_meta.get('release_column')})"
-            )
-            print(
-                "Evaluation release table"
-                f"{f' [{eval_label}]' if len(eval_datasets) > 1 else ''}: "
-                f"{eval_meta.get('release_csv_path')} "
-                f"(quarters={eval_meta.get('release_quarters_available')}, "
-                f"rows_with_release_target={eval_meta.get('rows_with_release_target')})"
-            )
-        else:
-            print(
-                "Evaluation truth source"
-                f"{f' [{eval_label}]' if len(eval_datasets) > 1 else ''}: "
-                "dataset finalized target path"
-            )
+        print(
+            "Evaluation truth source"
+            f"{f' [{eval_label}]' if len(eval_datasets) > 1 else ''}: "
+            f"{eval_meta['source']} (metric={eval_meta.get('release_metric')}, "
+            f"stage={eval_meta.get('release_stage')}, column={eval_meta.get('release_column')})"
+        )
+        print(
+            "Evaluation release table"
+            f"{f' [{eval_label}]' if len(eval_datasets) > 1 else ''}: "
+            f"{eval_meta.get('release_csv_path')} "
+            f"(quarters={eval_meta.get('release_quarters_available')}, "
+            f"rows_with_release_target={eval_meta.get('rows_with_release_target')})"
+        )
 
         print(
             "Local task dataset parquet"
@@ -375,8 +310,8 @@ def main() -> None:
                 target_transform=args.target_transform,
                 source_series_candidates=args.source_series_candidates,
                 covariate_columns=covariate_columns,
-                include_covariates=not args.disable_covariates,
-                apply_fred_transforms=apply_fred_transforms,
+                include_covariates=False,
+                apply_fred_transforms=False,
                 exclude_years_list=years_to_exclude,
                 timestamp_mapping=timestamp_mapping,
                 strict=not args.vintage_fallback_to_earliest,
@@ -434,6 +369,7 @@ def main() -> None:
 
     past_data_adapter = None
     if task_provider_by_name:
+
         def past_data_adapter(past_data, future_data, task, window_idx):  # type: ignore[no-redef]
             _ = future_data
             _ = window_idx
@@ -470,7 +406,9 @@ def main() -> None:
     print(f"Wrote pairwise: {results_dir / 'pairwise.csv'}")
 
     if not leaderboard_df.empty and metric_col in leaderboard_df.columns:
-        display_cols = [c for c in ["model_name", metric_col, "win_rate", "skill_vs_baseline"] if c in leaderboard_df.columns]
+        display_cols = [
+            c for c in ["model_name", metric_col, "win_rate", "skill_vs_baseline"] if c in leaderboard_df.columns
+        ]
         print("Top leaderboard rows:")
         print(leaderboard_df[display_cols].head(10).to_string(index=False))
 

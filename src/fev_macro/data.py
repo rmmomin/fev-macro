@@ -6,7 +6,7 @@ from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
-from datasets import Dataset, DatasetDict, load_dataset
+from datasets import Dataset
 from .fred_transforms import apply_fred_transform_codes, extract_fred_transform_codes
 
 DEFAULT_SOURCE_SERIES_CANDIDATES: tuple[str, ...] = (
@@ -451,34 +451,37 @@ class HistoricalQuarterlyVintageProvider:
 
 
 def load_fev_dataset(
-    config: str,
-    dataset_path: str = "autogluon/fev_datasets",
+    config: str | None = None,
+    dataset_path: str = "data/panels/gdpc1_releases_first_second_third.csv",
     split: str = "train",
     dataset_revision: str | None = None,
     dataset_kwargs: dict[str, Any] | None = None,
 ) -> Dataset:
-    """Load a fev-compatible dataset split from Hugging Face or local parquet."""
-    dataset_kwargs = dict(dataset_kwargs or {})
+    """Load a fev-compatible dataset from a local parquet file.
 
-    if str(dataset_path).endswith(".parquet"):
-        return load_dataset("parquet", data_files=str(dataset_path), split=split, **dataset_kwargs)
+    Remote Hugging Face dataset pulls are intentionally disabled.
+    """
+    _ = config
+    _ = split
+    _ = dataset_revision
+    _ = dataset_kwargs
 
-    dataset = load_dataset(
-        dataset_path,
-        name=config,
-        revision=dataset_revision,
-        split=split,
-        **dataset_kwargs,
+    parquet_path = Path(dataset_path).expanduser().resolve()
+    if not parquet_path.exists():
+        raise FileNotFoundError(
+            "Only local dataset paths are supported. "
+            f"Expected parquet at: {parquet_path}"
+        )
+    suffix = parquet_path.suffix.lower()
+    if suffix == ".parquet":
+        return Dataset.from_parquet(str(parquet_path))
+    if suffix == ".csv":
+        frame = pd.read_csv(parquet_path)
+        return Dataset.from_pandas(frame, preserve_index=False)
+    raise ValueError(
+        "Only local parquet/csv datasets are supported by load_fev_dataset. "
+        f"Got: {parquet_path}"
     )
-
-    if isinstance(dataset, Dataset):
-        return dataset
-    if isinstance(dataset, DatasetDict):
-        if split in dataset:
-            return dataset[split]
-        return dataset[next(iter(dataset.keys()))]
-
-    raise TypeError(f"Unexpected dataset type: {type(dataset)}")
 
 
 def find_gdp_column_candidates(dataset: Dataset, id_col: str = "id") -> dict[str, list[str]]:
@@ -571,6 +574,40 @@ def resolve_gdpc1_release_csv_path(path: str | Path | None = None) -> Path:
         "Could not locate gdpc1 release CSV. Checked default paths: "
         f"{candidates}"
     )
+
+
+def build_release_target_scaffold(
+    release_csv_path: str | Path | None = None,
+    target_series_name: str = DEFAULT_TARGET_SERIES_NAME,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Build timestamp scaffold from gdpc1 release CSV for stage-specific truth overlays."""
+    csv_path = resolve_gdpc1_release_csv_path(path=release_csv_path)
+    releases = pd.read_csv(csv_path)
+
+    if "observation_date" not in releases.columns:
+        raise ValueError(f"Release CSV missing required column 'observation_date': {csv_path}")
+
+    rel = releases.copy()
+    rel["observation_date"] = pd.to_datetime(rel["observation_date"], errors="coerce")
+    rel = rel.loc[rel["observation_date"].notna()].copy()
+    if rel.empty:
+        raise ValueError(f"Release CSV has no valid observation_date rows: {csv_path}")
+
+    rel["quarter"] = pd.PeriodIndex(rel["observation_date"], freq="Q-DEC")
+    rel = rel.sort_values("observation_date").drop_duplicates(subset=["quarter"], keep="last")
+
+    out = pd.DataFrame(
+        {
+            "item_id": target_series_name,
+            "timestamp": rel["observation_date"].to_numpy(),
+            "target": np.nan,
+        }
+    )
+    return out, {
+        "source": "gdpc1_release_csv_scaffold",
+        "release_csv_path": str(csv_path),
+        "rows": int(len(out)),
+    }
 
 
 def apply_gdpc1_release_truth_target(

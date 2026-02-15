@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from datasets import Dataset, load_dataset
+from datasets import Dataset
 
 from .base import BaseModel, get_history_by_item, get_item_order, get_task_horizon, get_task_id_column, to_prediction_dataset
 from .random_forest import _drift_fallback, _rows_by_item, _to_numeric_array
@@ -170,12 +171,12 @@ class QuarterlyFactorPCAModel(BaseModel):
 
 
 class MixedFrequencyDFMModel(BaseModel):
-    """Mixed-frequency factor model using FRED-MD monthly panel + GDP target."""
+    """Mixed-frequency factor model using local vintage-panel covariates + GDP target."""
 
     def __init__(
         self,
-        md_dataset_path: str = "autogluon/fev_datasets",
-        md_config: str = "fred_md_2025",
+        md_dataset_path: str = "data/panels/fred_qd_vintage_panel.parquet",
+        md_config: str = "local_qd_panel",
         max_monthly_covariates: int = 100,
         n_factors: int = 6,
         max_lag: int = 2,
@@ -324,26 +325,54 @@ def _load_fred_md_quarter_panel(
     max_covariates: int,
     excluded_years: tuple[int, ...],
 ) -> np.ndarray:
-    ds = load_dataset(dataset_path, name=config, split="train")
-    row = ds[0]
+    _ = config
+    panel_path = Path(dataset_path).expanduser().resolve()
+    if not panel_path.exists():
+        raise FileNotFoundError(
+            f"Local vintage panel not found for mixed_freq_dfm_md: {panel_path}. "
+            "Set md_dataset_path to a local parquet panel."
+        )
 
-    ts = pd.to_datetime(pd.Series(row["timestamp"]), errors="coerce")
-    md = pd.DataFrame(index=ts)
+    panel = pd.read_parquet(panel_path)
+    required_cols = {"timestamp", "vintage"}
+    missing = sorted(required_cols.difference(panel.columns))
+    if missing:
+        raise ValueError(f"Vintage panel missing required columns {missing}: {panel_path}")
 
-    cols = [c for c in ds.column_names if c not in {"id", "timestamp"}]
-    cols = cols[:max_covariates]
-    for c in cols:
-        md[c] = pd.to_numeric(pd.Series(row[c]), errors="coerce").to_numpy(dtype=float)
+    work = panel.copy()
+    work["timestamp"] = pd.to_datetime(work["timestamp"], errors="coerce")
+    work["vintage"] = work["vintage"].astype(str)
+    work = work.dropna(subset=["timestamp", "vintage"]).sort_values(["vintage", "timestamp"])
+    if work.empty:
+        return np.zeros((1, 1), dtype=float)
 
-    md = md.sort_index()
-    md = md.ffill().bfill().fillna(0.0)
+    latest_vintage = sorted(work["vintage"].unique())[-1]
+    latest = work.loc[work["vintage"] == latest_vintage].copy()
 
-    quarter = md.copy()
-    quarter["quarter"] = quarter.index.to_period("Q-DEC").to_timestamp(how="S")
-    q = quarter.groupby("quarter", sort=True).mean(numeric_only=True)
+    drop_cols = {"timestamp", "vintage", "vintage_timestamp", "GDPC1"}
+    candidate_cols = [c for c in latest.columns if c not in drop_cols]
+
+    numeric_cols: list[str] = []
+    for col in candidate_cols:
+        values = pd.to_numeric(latest[col], errors="coerce")
+        if values.notna().any():
+            latest[col] = values.astype(float)
+            numeric_cols.append(col)
+
+    if not numeric_cols:
+        return np.zeros((1, 1), dtype=float)
+
+    numeric_cols = numeric_cols[:max_covariates]
+
+    quarter = latest[["timestamp", *numeric_cols]].copy()
+    quarter["quarter"] = quarter["timestamp"].dt.to_period("Q-DEC").dt.to_timestamp(how="S")
+    q = quarter.groupby("quarter", sort=True)[numeric_cols].mean(numeric_only=True)
 
     if excluded_years:
         q = q.loc[~q.index.year.isin(list(excluded_years))]
+
+    if q.empty:
+        return np.zeros((1, max(1, len(numeric_cols))), dtype=float)
 
     q = q.ffill().bfill().fillna(0.0)
     return q.to_numpy(dtype=float)

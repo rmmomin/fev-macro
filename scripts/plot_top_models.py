@@ -16,17 +16,14 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from fev_macro.data import (  # noqa: E402
-    DEFAULT_SOURCE_SERIES_CANDIDATES,
     DEFAULT_TARGET_SERIES_NAME,
-    DEFAULT_TARGET_TRANSFORM,
     HistoricalQuarterlyVintageProvider,
     SUPPORTED_TARGET_TRANSFORMS,
+    apply_gdpc1_release_truth_target,
+    build_release_target_scaffold,
     build_reindexed_to_actual_timestamp_map,
-    build_real_gdp_target_series,
     exclude_years,
     export_local_dataset_parquet,
-    load_fred_qd_transform_codes,
-    load_fev_dataset,
     reindex_to_regular_frequency,
 )
 from fev_macro.models import build_models  # noqa: E402
@@ -37,22 +34,19 @@ from fev_macro.tasks import make_gdp_tasks  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Plot train/OOS real GDP q/q SAAR growth from log-real-GDP forecasts "
-            "for top-K models in the leaderboard."
+            "Plot train/OOS real GDP q/q SAAR growth for top-K models from the leaderboard, "
+            "using gdpc1 release-table truth."
         )
     )
     parser.add_argument("--results_dir", type=str, default="results")
     parser.add_argument("--leaderboard", type=str, default="results/leaderboard.csv")
-    parser.add_argument("--dataset_path", type=str, default="autogluon/fev_datasets")
-    parser.add_argument("--dataset_config", type=str, default="fred_qd_2025")
-    parser.add_argument("--dataset_revision", type=str, default=None)
     parser.add_argument("--target", type=str, default=DEFAULT_TARGET_SERIES_NAME)
     parser.add_argument(
         "--target_transform",
         type=str,
-        default=DEFAULT_TARGET_TRANSFORM,
+        default="saar_growth",
         choices=sorted(SUPPORTED_TARGET_TRANSFORMS),
-        help="Forecast target transform used by the benchmark (must be log_level or level for this plot).",
+        help="Forecast target transform used by the benchmark.",
     )
     parser.add_argument("--horizon", type=int, default=1)
     parser.add_argument("--num_windows", type=int, default=80)
@@ -85,9 +79,24 @@ def parse_args() -> argparse.Namespace:
         help="Output OOS predictions csv path",
     )
     parser.add_argument(
-        "--source_series_candidates",
-        nargs="+",
-        default=list(DEFAULT_SOURCE_SERIES_CANDIDATES),
+        "--release_csv",
+        type=str,
+        default="data/panels/gdpc1_releases_first_second_third.csv",
+        help="Path to gdpc1 release table CSV used as the sole benchmark truth source.",
+    )
+    parser.add_argument(
+        "--release_metric",
+        type=str,
+        choices=["realtime_qoq_saar", "level"],
+        default="realtime_qoq_saar",
+        help="Release-table column family used for truth.",
+    )
+    parser.add_argument(
+        "--release_stage",
+        type=str,
+        choices=["first", "second", "third", "latest"],
+        default="first",
+        help="Release stage used for plotting/evaluation truth.",
     )
     parser.add_argument(
         "--historical_qd_dir",
@@ -98,23 +107,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--disable_historical_vintages",
         action="store_true",
-        help="Disable historical-vintage training and use finalized data for all windows.",
-    )
-    parser.add_argument(
-        "--disable_fred_transforms",
-        action="store_true",
-        help="Disable FRED-MD/QD tcode transforms for covariates during dataset construction.",
-    )
-    parser.add_argument(
-        "--fred_transform_vintage",
-        type=str,
-        default=None,
-        help="Optional transform-code vintage month (YYYY-MM); default uses latest available historical vintage.",
+        help="Disable historical-vintage training and use finalized release-table data for all windows.",
     )
     parser.add_argument(
         "--vintage_fallback_to_earliest",
         action="store_true",
         help="Allow pre-vintage windows to use earliest available vintage instead of strict coverage.",
+    )
+    parser.add_argument(
+        "--qd_vintage_panel",
+        type=str,
+        default="data/panels/fred_qd_vintage_panel.parquet",
+        help="Fallback QD vintage panel parquet when historical CSV vintages are unavailable.",
     )
     return parser.parse_args()
 
@@ -207,7 +211,7 @@ def _to_log_series(values: pd.Series, target_transform: str) -> pd.Series:
     if target_transform == "level":
         return np.log(series.where(series > 0, np.nan))
     raise ValueError(
-        "Plot conversion to q/q SAAR from log GDP requires target_transform in {'log_level', 'level'}. "
+        "Plot conversion from levels/log-level requires target_transform in {'log_level', 'level'}. "
         f"Got: {target_transform}"
     )
 
@@ -228,6 +232,22 @@ def make_growth_view(
     full["timestamp"] = pd.to_datetime(full["timestamp"], errors="coerce")
     full = full.dropna(subset=["timestamp", "target"]).sort_values("timestamp").reset_index(drop=True)
 
+    oos = oos_raw_df.copy()
+    oos["timestamp"] = pd.to_datetime(oos["timestamp"], errors="coerce")
+    oos = oos.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+    if target_transform == "saar_growth":
+        full["actual_growth_saar"] = pd.to_numeric(full["target"], errors="coerce")
+        oos["actual_growth_saar"] = pd.to_numeric(oos["actual"], errors="coerce")
+        for model_name in model_names:
+            if model_name not in oos.columns:
+                continue
+            oos[f"{model_name}_growth_saar"] = pd.to_numeric(oos[model_name], errors="coerce")
+
+        first_test_ts = pd.to_datetime(oos["timestamp"]).min()
+        history = full.loc[full["timestamp"] < first_test_ts, ["timestamp", "actual_growth_saar"]].dropna().copy()
+        return history, oos
+
     ref = full_reference_df[["timestamp", "target"]].copy()
     ref["timestamp"] = pd.to_datetime(ref["timestamp"], errors="coerce")
     ref = ref.dropna(subset=["timestamp", "target"]).sort_values("timestamp").reset_index(drop=True)
@@ -238,10 +258,6 @@ def make_growth_view(
     prev_lookup = ref[["timestamp", "prev_log"]].copy()
     full = full.merge(prev_lookup, on="timestamp", how="left")
     full["actual_growth_saar"] = _log_diff_to_saar(full["actual_log"] - full["prev_log"])
-
-    oos = oos_raw_df.copy()
-    oos["timestamp"] = pd.to_datetime(oos["timestamp"], errors="coerce")
-    oos = oos.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
     oos = oos.merge(prev_lookup, on="timestamp", how="left")
     oos["actual_log"] = _to_log_series(oos["actual"], target_transform=target_transform)
@@ -305,7 +321,7 @@ def make_plot(
 
     ax.set_title(
         (
-            "US Real GDP Growth (q/q SAAR from log real GDP): "
+            "US Real GDP Growth (q/q SAAR): "
             f"Train History + OOS Forecasts (Top {len(model_names)} Models, h={horizon}, windows={num_windows})"
         )
     )
@@ -323,6 +339,9 @@ def make_plot(
 def main() -> None:
     args = parse_args()
 
+    if args.release_metric == "realtime_qoq_saar" and args.target_transform != "saar_growth":
+        raise ValueError("--release_metric realtime_qoq_saar requires --target_transform saar_growth.")
+
     results_dir = Path(args.results_dir)
     leaderboard_path = Path(args.leaderboard)
     output_path = Path(args.output)
@@ -330,34 +349,18 @@ def main() -> None:
 
     top_models = load_top_models(leaderboard_path=leaderboard_path, top_k=args.top_k)
 
-    dataset = load_fev_dataset(
-        config=args.dataset_config,
-        dataset_path=args.dataset_path,
-        dataset_revision=args.dataset_revision,
-    )
-
-    apply_fred_transforms = not args.disable_fred_transforms
-    transform_vintage = pd.Period(args.fred_transform_vintage, freq="M") if args.fred_transform_vintage else None
-    fred_transform_codes: dict[str, int] = {}
-    if apply_fred_transforms:
-        try:
-            fred_transform_codes = load_fred_qd_transform_codes(
-                historical_qd_dir=args.historical_qd_dir,
-                vintage_period=transform_vintage,
-            )
-        except Exception as err:
-            print(f"Warning: unable to load FRED transform codes ({err}); continuing without transforms.")
-            apply_fred_transforms = False
-
-    gdp_full_df, gdp_meta = build_real_gdp_target_series(
-        dataset=dataset,
+    scaffold_df, _ = build_release_target_scaffold(
+        release_csv_path=args.release_csv,
         target_series_name=args.target,
-        target_transform=args.target_transform,
-        source_series_candidates=args.source_series_candidates,
-        include_covariates=True,
-        apply_fred_transforms=apply_fred_transforms,
-        fred_transform_codes=fred_transform_codes,
     )
+    gdp_full_df, truth_meta = apply_gdpc1_release_truth_target(
+        dataset_df=scaffold_df,
+        release_csv_path=args.release_csv,
+        release_stage=args.release_stage,
+        release_metric=args.release_metric,
+        target_transform=args.target_transform,
+    )
+
     years_to_exclude = sorted({int(y) for y in (args.exclude_years or [])})
     gdp_df = exclude_years(gdp_full_df, years=years_to_exclude)
     gdp_filtered_actual = gdp_df.copy()
@@ -369,7 +372,7 @@ def main() -> None:
         id_col="item_id",
         timestamp_col="timestamp",
     )
-    covariate_columns = list(gdp_meta.get("covariate_columns", []))
+    covariate_columns: list[str] = []
 
     local_dataset_path = results_dir / f"{args.target.lower()}_dataset.parquet"
     export_local_dataset_parquet(gdp_task_df, output_path=local_dataset_path)
@@ -381,14 +384,15 @@ def main() -> None:
             historical_qd_dir=args.historical_qd_dir,
             target_series_name=args.target,
             target_transform=args.target_transform,
-            source_series_candidates=args.source_series_candidates,
+            source_series_candidates=("GDPC1",),
             covariate_columns=covariate_columns,
-            include_covariates=True,
-            apply_fred_transforms=apply_fred_transforms,
+            include_covariates=False,
+            apply_fred_transforms=False,
             exclude_years_list=years_to_exclude,
             timestamp_mapping=timestamp_mapping,
             strict=not args.vintage_fallback_to_earliest,
             fallback_to_earliest=args.vintage_fallback_to_earliest,
+            qd_panel_path=args.qd_vintage_panel,
         )
         print(
             "Historical FRED-QD vintages enabled for plotting: "
@@ -476,18 +480,12 @@ def main() -> None:
 
     print(f"Top models: {top_models}")
     print(
-        "Target used: "
-        f"{gdp_meta['target_series']} "
-        f"(transform={gdp_meta.get('target_transform', args.target_transform)}, "
-        f"computed={gdp_meta['computed']}, source={gdp_meta['source_series']})"
+        "Truth used: "
+        f"metric={truth_meta.get('release_metric')} stage={truth_meta.get('release_stage')} "
+        f"column={truth_meta.get('release_column')}"
     )
     print(f"Excluded years: {years_to_exclude}")
     print(f"Covariates used: {len(covariate_columns)}")
-    print(
-        "FRED transforms enabled: "
-        f"{apply_fred_transforms}; transform codes loaded={len(fred_transform_codes)}; "
-        f"covariates transformed={len(gdp_meta.get('transformed_covariates', []))}"
-    )
     print(f"Saved OOS predictions: {predictions_csv}")
     print(f"Saved plot: {output_path}")
 

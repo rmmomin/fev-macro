@@ -28,19 +28,19 @@ The harness is designed so models can be added modularly and compared fairly und
 
 ## Task Definition
 
-- Base covariate dataset source: `autogluon/fev_datasets` with config `fred_qd_2025`.
+- Base benchmark dataset source: `data/panels/gdpc1_releases_first_second_third.csv`.
 - Evaluation truth source (default): `data/panels/gdpc1_releases_first_second_third.csv` using realtime SAAR columns:
   - `qoq_saar_growth_realtime_first_pct`
   - `qoq_saar_growth_realtime_second_pct`
   - `qoq_saar_growth_realtime_third_pct`
-- Vintage semantics: `fred_qd_2025` is a single finalized snapshot (`id=FRED-QD-2025-07`) used for covariates/task scaffolding, not a full real-time vintage history. Historical real-time revisions are provided separately by `data/panels/fred_qd_vintage_panel.parquet` (or raw monthly vintage CSVs under `data/historical/qd/`).
+- Historical vintage source (training windows): `data/panels/fred_qd_vintage_panel.parquet` (or raw monthly vintage CSVs under `data/historical/qd/`).
 - Target construction:
-  - If target exists, use it directly.
-  - Otherwise compute from real GDP level (e.g., `GDPC1`):
+  - Default benchmark target uses release-table realtime SAAR truth directly (`realtime_qoq_saar`).
+  - Optional level mode uses release-stage GDP levels (`first/second/third/latest`) transformed to:
     - `level`: `y_t`
     - `log_level`: `log(y_t)`
     - `saar_growth`: `100 * ((y_t / y_{t-1})**4 - 1)`
-- Covariate construction: FRED transform codes (`tcode` 1-7) are applied by default using historical FRED-QD metadata.
+- Covariate construction: benchmark task datasets are release-table-only (univariate scaffold), while historical-vintage adaptation continues to use local FRED-QD vintage data.
 - Backtest engine: `fev.Task.iter_windows()` (expanding windows).
 - Default metric: `RMSE`.
 - Exclusion rule: year `2020` is removed from training/evaluation data.
@@ -88,7 +88,7 @@ The harness is designed so models can be added modularly and compared fairly und
 | `bvar_minnesota_8` | Minnesota-style shrinkage BVAR (~8 total vars including GDP) | Target + selected macro covariates (~7) from FRED-QD |
 | `bvar_minnesota_20` | Minnesota-style shrinkage BVAR (~20 total vars including GDP) | Target + selected macro covariates (~19) from FRED-QD |
 | `factor_pca_qd` | Quarterly PCA factor regression | Target lags + PCA factors from up to ~80 FRED-QD covariates |
-| `mixed_freq_dfm_md` | Mixed-frequency factor model using FRED-MD monthly panel | Target lags + factors from aggregated FRED-MD monthly data |
+| `mixed_freq_dfm_md` | Mixed-frequency factor model using local vintage-panel covariates | Target lags + factors from latest local QD vintage panel (`data/panels/fred_qd_vintage_panel.parquet`) |
 | `chronos2` | Zero-shot Chronos-2 foundation model adapter | Target history + available dynamic covariates passed as context/future known covariates |
 | `ensemble_avg_top3` | Equal-weight ensemble | Drift + AutoARIMA + LocalTrendSSM predictions |
 | `ensemble_weighted_top5` | Weighted ensemble | Drift + AutoARIMA + LocalTrendSSM + FactorPCAQD + SeasonalNaive predictions |
@@ -103,8 +103,8 @@ Notes:
 
 The harness enforces a vintage-aware protocol:
 
-1. Build the canonical task frame from `fred_qd_2025` (target scaffold + covariates).
-2. Replace task target values with release-table realtime q/q SAAR truth from `gdpc1_releases_first_second_third.csv`.
+1. Build the canonical task frame from `gdpc1_releases_first_second_third.csv` (quarter scaffold).
+2. Set task target values from release-table realtime q/q SAAR truth.
 3. By default, build three evaluation slices (`first`, `second`, `third`) from:
    - `qoq_saar_growth_realtime_first_pct`
    - `qoq_saar_growth_realtime_second_pct`
@@ -113,7 +113,7 @@ The harness enforces a vintage-aware protocol:
 5. For each rolling window, identify the training cutoff date.
 6. Select the latest historical FRED-QD vintage file with vintage month `<=` that cutoff.
 7. Replace `past_data` (training history) with data from that selected vintage.
-8. Keep `future_data` and OOS ground truth from the release-truth-overlaid task dataset.
+8. Keep `future_data` and OOS ground truth from the release-table task dataset.
 
 This ensures models train only on information available at that historical point, while scoring uses explicit GDP release truth rather than finalized revised GDP.
 
@@ -131,13 +131,7 @@ This repo ports the transformation logic from [`enweg/FredMDQD.jl`](https://gith
 
 By default, transform codes are loaded from the latest file under `--historical_qd_dir` and applied to covariates for both:
 
-- finalized HF dataset construction (`build_real_gdp_target_series`)
 - per-window historical-vintage training reconstruction (`HistoricalQuarterlyVintageProvider`)
-
-CLI controls:
-
-- `--disable_fred_transforms`
-- `--fred_transform_vintage YYYY-MM`
 
 ### Strict vintage coverage
 
@@ -321,7 +315,6 @@ Default benchmark CLI settings:
 - `--num_windows 100`
 - `--metric RMSE`
 - `--target_transform saar_growth`
-- `--eval_truth_source release_csv`
 - `--eval_release_metric realtime_qoq_saar`
 - `--eval_release_csv data/panels/gdpc1_releases_first_second_third.csv`
 - `--eval_release_stages first second third`
