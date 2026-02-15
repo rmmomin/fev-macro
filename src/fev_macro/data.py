@@ -213,6 +213,7 @@ class HistoricalQuarterlyVintageProvider:
         timestamp_mapping: dict[pd.Timestamp, pd.Timestamp] | None = None,
         strict: bool = True,
         fallback_to_earliest: bool = False,
+        qd_panel_path: str | Path | None = None,
     ) -> None:
         self.target_series_name = target_series_name
         self.target_transform = target_transform
@@ -227,9 +228,34 @@ class HistoricalQuarterlyVintageProvider:
         self.strict = bool(strict)
         self.fallback_to_earliest = bool(fallback_to_earliest)
 
-        self.vintage_files = discover_historical_qd_vintage_files(historical_qd_dir=historical_qd_dir)
-        self.historical_qd_dir = next(iter(self.vintage_files.values())).parent.resolve()
-        self.vintage_periods = sorted(self.vintage_files.keys())
+        self.vintage_files: dict[pd.Period, Path] = {}
+        self._panel_df: pd.DataFrame | None = None
+        self._uses_panel_source = False
+
+        try:
+            self.vintage_files = discover_historical_qd_vintage_files(historical_qd_dir=historical_qd_dir)
+            self.historical_qd_dir = next(iter(self.vintage_files.values())).parent.resolve()
+            self.vintage_periods = sorted(self.vintage_files.keys())
+        except FileNotFoundError:
+            panel_candidate = Path(qd_panel_path) if qd_panel_path is not None else Path("data/panels/fred_qd_vintage_panel.parquet")
+            panel_candidate = panel_candidate.expanduser().resolve()
+            if not panel_candidate.exists():
+                raise
+            panel_df = pd.read_parquet(panel_candidate)
+            if "vintage" not in panel_df.columns:
+                raise ValueError(f"Qd panel missing required 'vintage' column: {panel_candidate}")
+            if "timestamp" not in panel_df.columns:
+                raise ValueError(f"Qd panel missing required 'timestamp' column: {panel_candidate}")
+            panel_df = panel_df.copy()
+            panel_df["timestamp"] = pd.to_datetime(panel_df["timestamp"], errors="coerce")
+            panel_df["vintage"] = panel_df["vintage"].astype(str)
+            panel_df = panel_df.dropna(subset=["timestamp", "vintage"]).sort_values(["vintage", "timestamp"]).reset_index(drop=True)
+            periods = sorted({pd.Period(v, freq="M") for v in panel_df["vintage"].unique()})
+            self.vintage_periods = periods
+            self._panel_df = panel_df
+            self._uses_panel_source = True
+            self.historical_qd_dir = panel_candidate
+
         self._cache: dict[pd.Period, pd.DataFrame] = {}
         self._selection_cache: dict[pd.Period, pd.Period | None] = {}
 
@@ -374,11 +400,22 @@ class HistoricalQuarterlyVintageProvider:
         if vintage_period in self._cache:
             return self._cache[vintage_period]
 
-        csv_path = self.vintage_files[vintage_period]
-        wide, transform_codes = load_historical_fred_qd_vintage_dataframe(
-            csv_path=csv_path,
-            return_transform_codes=True,
-        )
+        if self._uses_panel_source:
+            if self._panel_df is None:
+                raise ValueError("Qd panel source is enabled but no panel dataframe is loaded.")
+            vintage_key = f"{vintage_period.year:04d}-{vintage_period.month:02d}"
+            wide = self._panel_df.loc[self._panel_df["vintage"] == vintage_key].copy()
+            wide = wide.drop(columns=["vintage", "vintage_timestamp"], errors="ignore")
+            transform_codes: dict[str, int] = {}
+            apply_transforms = False
+        else:
+            csv_path = self.vintage_files[vintage_period]
+            wide, transform_codes = load_historical_fred_qd_vintage_dataframe(
+                csv_path=csv_path,
+                return_transform_codes=True,
+            )
+            apply_transforms = self.apply_fred_transforms
+
         target_df, _ = build_real_gdp_target_series_from_time_rows(
             wide_df=wide,
             target_series_name=self.target_series_name,
@@ -386,7 +423,7 @@ class HistoricalQuarterlyVintageProvider:
             source_series_candidates=self.source_series_candidates,
             include_covariates=self.include_covariates,
             covariate_allowlist=self.covariate_columns or None,
-            apply_fred_transforms=self.apply_fred_transforms,
+            apply_fred_transforms=apply_transforms,
             fred_transform_codes=transform_codes,
         )
 

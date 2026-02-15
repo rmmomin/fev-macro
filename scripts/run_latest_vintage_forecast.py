@@ -14,6 +14,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from fev_macro.models import available_models  # noqa: E402
+from fev_macro.realtime_feeds import select_covariate_columns, train_df_to_datasets  # noqa: E402
 from fev_macro.realtime_oos import (  # noqa: E402
     BUILTIN_MODELS,
     build_origin_datasets,
@@ -83,7 +85,7 @@ def parse_args() -> argparse.Namespace:
             "ensemble_weighted_top5",
             "naive_last",
         ],
-        help=f"Model names. Available: {sorted(BUILTIN_MODELS)}",
+        help=f"Model names. Available: {sorted(set(BUILTIN_MODELS) | set(available_models()))}",
     )
     parser.add_argument("--train_window", type=str, default="expanding", choices=["expanding", "rolling"])
     parser.add_argument("--rolling_size", type=int, default=None)
@@ -159,7 +161,16 @@ def main() -> int:
     rows: list[dict[str, object]] = []
     for model in model_list:
         try:
-            path = np.asarray(model.forecast_levels(train_df=train_df, horizon=horizon, target_col=args.target_col), dtype=float)
+            covariate_cols = select_covariate_columns(train_df=train_df, target_col=args.target_col)
+            past_data, future_data, task_shim = train_df_to_datasets(
+                train_df=train_df,
+                target_col=args.target_col,
+                horizon=horizon,
+                covariate_cols=covariate_cols,
+            )
+            task_shim.train_df = train_df
+            pred_ds = model.predict(past_data=past_data, future_data=future_data, task=task_shim)
+            path = np.asarray(pred_ds["predictions"][0], dtype=float)
             if path.size != horizon:
                 raise ValueError(f"expected horizon={horizon}, got {path.size}")
             if not np.isfinite(path).all():

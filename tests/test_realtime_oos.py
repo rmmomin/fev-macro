@@ -19,6 +19,8 @@ from fev_macro.realtime_oos import (  # noqa: E402
     to_quarter_period,
     to_saar_growth,
 )
+from fev_macro.realtime_feeds import train_df_to_datasets  # noqa: E402
+from fev_macro.vintage_panels import build_panel_from_files  # noqa: E402
 
 
 def test_saar_conversion_toy_series() -> None:
@@ -174,3 +176,44 @@ def test_run_backtest_respects_min_target_quarter_filter() -> None:
     assert not preds.empty
     min_target = min(pd.Period(q, freq="Q-DEC") for q in preds["target_quarter"].astype(str))
     assert min_target >= pd.Period("2022Q1", freq="Q-DEC")
+
+
+def test_train_df_to_datasets_builds_ragged_edge_future_covariates() -> None:
+    train_df = pd.DataFrame(
+        {
+            "quarter": pd.PeriodIndex(["2023Q1", "2023Q2", "2023Q3", "2023Q4", "2024Q1"], freq="Q-DEC"),
+            "GDPC1": [100.0, 101.0, 102.0, np.nan, np.nan],
+            "UNRATE": [4.0, 4.1, 4.2, 4.3, np.nan],
+        }
+    )
+    past_data, future_data, task = train_df_to_datasets(
+        train_df=train_df,
+        target_col="GDPC1",
+        horizon=2,
+        covariate_cols=["UNRATE"],
+    )
+
+    assert task.horizon == 2
+    assert len(past_data[0]["GDPC1"]) == 3
+    assert future_data[0]["UNRATE"] == [4.3, 4.3]
+
+
+def test_build_panel_applies_transforms_but_can_exclude_gdpc1(tmp_path: Path) -> None:
+    csv_path = tmp_path / "fred_qd_2020m01.csv"
+    csv_path.write_text(
+        "sasdate,GDPC1,UNRATE\n"
+        "transform,5,2\n"
+        "01/01/2020,100,4.0\n"
+        "04/01/2020,110,4.5\n",
+        encoding="utf-8",
+    )
+    panel = build_panel_from_files(
+        {pd.Period("2020-01", freq="M"): csv_path},
+        apply_transforms=True,
+        exclude_from_transforms=("timestamp", "GDPC1"),
+    )
+
+    assert np.isclose(panel.loc[0, "GDPC1"], 100.0)
+    assert np.isclose(panel.loc[1, "GDPC1"], 110.0)
+    assert np.isnan(panel.loc[0, "UNRATE"])
+    assert np.isclose(panel.loc[1, "UNRATE"], 0.5)

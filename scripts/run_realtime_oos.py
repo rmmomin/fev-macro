@@ -19,6 +19,7 @@ from fev_macro.realtime_oos import (  # noqa: E402
     load_vintage_panel,
     run_backtest,
 )
+from fev_macro.models import available_models  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,7 +51,7 @@ def parse_args() -> argparse.Namespace:
         "--models",
         nargs="+",
         default=None,
-        help=f"Model names. Available: {sorted(BUILTIN_MODELS)}",
+        help=f"Model names. Available: {sorted(set(BUILTIN_MODELS) | set(available_models()))}",
     )
     parser.add_argument("--horizons", type=int, nargs="+", default=[1, 2, 3, 4])
     parser.add_argument(
