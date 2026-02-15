@@ -2,5 +2,7 @@
 __pycache__/
 .pytest_cache/
 results/
-data/
+data/*
+!data/panels/
+!data/panels/**
 *.pyc

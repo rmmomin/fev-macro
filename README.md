@@ -21,6 +21,7 @@ The harness is designed so models can be added modularly and compared fairly und
     - `level`: `y_t`
     - `log_level`: `log(y_t)`
     - `saar_growth`: `100 * ((y_t / y_{t-1})**4 - 1)`
+- Covariate construction: FRED transform codes (`tcode` 1-7) are applied by default using historical FRED-QD metadata.
 - Backtest engine: `fev.Task.iter_windows()` (expanding windows).
 - Default metric: `RMSE`.
 - Exclusion rule: year `2020` is removed from training/evaluation data.
@@ -88,9 +89,31 @@ The harness enforces a vintage-aware protocol:
 
 This ensures models train only on information available at that historical point, while test scoring uses the finalized benchmark target path.
 
+## FRED Transform Codes (FredMDQD.jl Port)
+
+This repo ports the transformation logic from [`enweg/FredMDQD.jl`](https://github.com/enweg/FredMDQD.jl) into `src/fev_macro/fred_transforms.py` and applies it during dataset construction:
+
+- `1`: `x`
+- `2`: `Δx`
+- `3`: `Δ²x`
+- `4`: `log(x)`
+- `5`: `Δlog(x)`
+- `6`: `Δ²log(x)`
+- `7`: `Δ(x_t / x_{t-1} - 1)`
+
+By default, transform codes are loaded from the latest file under `--historical_qd_dir` and applied to covariates for both:
+
+- finalized HF dataset construction (`build_real_gdp_target_series`)
+- per-window historical-vintage training reconstruction (`HistoricalQuarterlyVintageProvider`)
+
+CLI controls:
+
+- `--disable_fred_transforms`
+- `--fred_transform_vintage YYYY-MM`
+
 ### Strict vintage coverage
 
-- Historical quarterly vintages available: `2018-05` to `2024-12`.
+- Historical quarterly vintages available: `2018-05` to `2026-01`.
 - With default request `num_windows=80`, strict coverage reduces effective windows to:
   - `h=1`: `24`
   - `h=2`: `23`
@@ -112,7 +135,24 @@ Equivalent script:
 PYTHONPATH=src .venv/bin/python scripts/download_historical_vintages.py
 ```
 
-Default extraction root: `data/historical/`.
+Default extraction root: `data/historical/`, organized as:
+
+- `data/historical/qd/` for quarterly vintages
+- `data/historical/md/` for monthly vintages
+
+## Build Vintage Panels
+
+Build separate combined panels across all vintages (each row includes `vintage` and `timestamp`):
+
+```bash
+make panel-md
+make panel-qd
+```
+
+Outputs:
+
+- `data/panels/fred_md_vintage_panel.parquet`
+- `data/panels/fred_qd_vintage_panel.parquet`
 
 ## Running The Benchmark
 

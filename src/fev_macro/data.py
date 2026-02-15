@@ -7,6 +7,7 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 from datasets import Dataset, DatasetDict, load_dataset
+from .fred_transforms import apply_fred_transform_codes, extract_fred_transform_codes
 
 DEFAULT_SOURCE_SERIES_CANDIDATES: tuple[str, ...] = (
     "GDPC1",
@@ -46,14 +47,21 @@ def discover_historical_qd_vintage_files(historical_qd_dir: str | Path) -> dict[
     return dict(sorted(files.items(), key=lambda kv: kv[0]))
 
 
-def load_historical_fred_qd_vintage_dataframe(csv_path: str | Path) -> pd.DataFrame:
-    """Load one historical FRED-QD vintage CSV and return numeric quarterly rows."""
+def load_historical_fred_qd_vintage_dataframe(
+    csv_path: str | Path,
+    return_transform_codes: bool = False,
+) -> pd.DataFrame | tuple[pd.DataFrame, dict[str, int]]:
+    """Load one historical FRED-QD vintage CSV and return numeric quarterly rows.
+
+    If `return_transform_codes` is True, also return parsed FRED transform codes.
+    """
     csv_path = Path(csv_path)
     raw = pd.read_csv(csv_path)
     if raw.empty:
         raise ValueError(f"Historical vintage CSV has no rows: {csv_path}")
 
     date_col = str(raw.columns[0])
+    transform_codes = extract_fred_transform_codes(raw_df=raw, first_col_name=date_col)
     date_values = pd.to_datetime(raw[date_col], format="%m/%d/%Y", errors="coerce")
     data = raw.loc[date_values.notna()].copy()
     if data.empty:
@@ -67,7 +75,40 @@ def load_historical_fred_qd_vintage_dataframe(csv_path: str | Path) -> pd.DataFr
             continue
         data[col] = pd.to_numeric(data[col], errors="coerce")
 
+    if return_transform_codes:
+        return data, transform_codes
     return data
+
+
+def load_fred_qd_transform_codes(
+    historical_qd_dir: str | Path,
+    vintage_period: pd.Period | None = None,
+) -> dict[str, int]:
+    """Load FRED-QD transform-code map from a historical vintage CSV.
+
+    When `vintage_period` is None, uses the latest available vintage under `historical_qd_dir`.
+    """
+    vintage_files = discover_historical_qd_vintage_files(historical_qd_dir=historical_qd_dir)
+    if not vintage_files:
+        return {}
+
+    if vintage_period is None:
+        selected_period = max(vintage_files.keys())
+    else:
+        if vintage_period in vintage_files:
+            selected_period = vintage_period
+        else:
+            eligible = [p for p in vintage_files if p <= vintage_period]
+            if not eligible:
+                selected_period = min(vintage_files.keys())
+            else:
+                selected_period = max(eligible)
+
+    _, transform_codes = load_historical_fred_qd_vintage_dataframe(
+        csv_path=vintage_files[selected_period],
+        return_transform_codes=True,
+    )
+    return transform_codes
 
 
 def build_real_gdp_target_series_from_time_rows(
@@ -77,6 +118,8 @@ def build_real_gdp_target_series_from_time_rows(
     source_series_candidates: Sequence[str] | None = None,
     include_covariates: bool = False,
     covariate_allowlist: Sequence[str] | None = None,
+    apply_fred_transforms: bool = False,
+    fred_transform_codes: dict[str, int] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Build real-GDP target series from row-wise time dataframe with `timestamp` column."""
     _validate_target_transform(target_transform)
@@ -117,6 +160,7 @@ def build_real_gdp_target_series_from_time_rows(
     )
 
     covariate_columns: list[str] = []
+    transformed_covariates: list[str] = []
     if include_covariates:
         excluded = {"timestamp", target_series_name, source_series}
         allowlist = set(covariate_allowlist or [])
@@ -130,6 +174,13 @@ def build_real_gdp_target_series_from_time_rows(
 
         if selected_covariates:
             cov_frame = data[selected_covariates].apply(pd.to_numeric, errors="coerce")
+            if apply_fred_transforms and fred_transform_codes:
+                cov_frame = apply_fred_transform_codes(
+                    data_df=cov_frame,
+                    transform_codes=fred_transform_codes,
+                    columns=selected_covariates,
+                )
+                transformed_covariates = [c for c in selected_covariates if c in fred_transform_codes]
             out = pd.concat([out, cov_frame.reset_index(drop=True)], axis=1)
             covariate_columns.extend(selected_covariates)
 
@@ -140,6 +191,9 @@ def build_real_gdp_target_series_from_time_rows(
         "target_series": target_series_name,
         "target_transform": target_transform,
         "covariate_columns": covariate_columns,
+        "apply_fred_transforms": bool(apply_fred_transforms),
+        "transformed_covariates": transformed_covariates,
+        "transform_code_count": len(fred_transform_codes or {}),
     }
 
 
@@ -154,6 +208,7 @@ class HistoricalQuarterlyVintageProvider:
         source_series_candidates: Sequence[str] | None = None,
         covariate_columns: Sequence[str] | None = None,
         include_covariates: bool = True,
+        apply_fred_transforms: bool = True,
         exclude_years_list: Sequence[int] | None = None,
         timestamp_mapping: dict[pd.Timestamp, pd.Timestamp] | None = None,
         strict: bool = True,
@@ -163,6 +218,7 @@ class HistoricalQuarterlyVintageProvider:
         self.target_transform = target_transform
         self.source_series_candidates = tuple(source_series_candidates or DEFAULT_SOURCE_SERIES_CANDIDATES)
         self.include_covariates = bool(include_covariates)
+        self.apply_fred_transforms = bool(apply_fred_transforms)
         self.covariate_columns = list(covariate_columns or [])
         self.exclude_years_list = sorted({int(y) for y in (exclude_years_list or [])})
         self.timestamp_mapping = {
@@ -319,7 +375,10 @@ class HistoricalQuarterlyVintageProvider:
             return self._cache[vintage_period]
 
         csv_path = self.vintage_files[vintage_period]
-        wide = load_historical_fred_qd_vintage_dataframe(csv_path=csv_path)
+        wide, transform_codes = load_historical_fred_qd_vintage_dataframe(
+            csv_path=csv_path,
+            return_transform_codes=True,
+        )
         target_df, _ = build_real_gdp_target_series_from_time_rows(
             wide_df=wide,
             target_series_name=self.target_series_name,
@@ -327,6 +386,8 @@ class HistoricalQuarterlyVintageProvider:
             source_series_candidates=self.source_series_candidates,
             include_covariates=self.include_covariates,
             covariate_allowlist=self.covariate_columns or None,
+            apply_fred_transforms=self.apply_fred_transforms,
+            fred_transform_codes=transform_codes,
         )
 
         if self.exclude_years_list:
@@ -396,6 +457,8 @@ def build_real_gdp_target_series(
     timestamp_col: str = "timestamp",
     target_col: str = "target",
     include_covariates: bool = False,
+    apply_fred_transforms: bool = False,
+    fred_transform_codes: dict[str, int] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Build real-GDP target series and optional aligned covariates in long format.
 
@@ -422,6 +485,8 @@ def build_real_gdp_target_series(
             timestamp_col=timestamp_col,
             target_col=target_col,
             include_covariates=include_covariates,
+            apply_fred_transforms=apply_fred_transforms,
+            fred_transform_codes=fred_transform_codes,
         )
 
     return _build_from_wide_format(
@@ -431,6 +496,8 @@ def build_real_gdp_target_series(
         source_series_candidates=source_series_candidates,
         timestamp_col=timestamp_col,
         include_covariates=include_covariates,
+        apply_fred_transforms=apply_fred_transforms,
+        fred_transform_codes=fred_transform_codes,
     )
 
 
@@ -442,6 +509,8 @@ def build_gdp_saar_growth_series(
     timestamp_col: str = "timestamp",
     target_col: str = "target",
     include_covariates: bool = False,
+    apply_fred_transforms: bool = False,
+    fred_transform_codes: dict[str, int] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Backward-compatible wrapper for GDP q/q SAAR target construction."""
     return build_real_gdp_target_series(
@@ -453,6 +522,8 @@ def build_gdp_saar_growth_series(
         timestamp_col=timestamp_col,
         target_col=target_col,
         include_covariates=include_covariates,
+        apply_fred_transforms=apply_fred_transforms,
+        fred_transform_codes=fred_transform_codes,
     )
 
 
@@ -694,6 +765,8 @@ def _build_from_long_format(
     timestamp_col: str,
     target_col: str,
     include_covariates: bool,
+    apply_fred_transforms: bool,
+    fred_transform_codes: dict[str, int] | None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     if timestamp_col not in pdf.columns:
         raise ValueError(f"Long-format dataset must include '{timestamp_col}'")
@@ -737,12 +810,21 @@ def _build_from_long_format(
     )
 
     covariate_columns: list[str] = []
+    transformed_covariates: list[str] = []
     if include_covariates:
         excluded = {target_series_name, source_series}
         for cov in pivot.columns:
             if cov in excluded:
                 continue
-            out[cov] = pd.to_numeric(pivot[cov], errors="coerce").to_numpy(dtype=float)
+            cov_series = pd.to_numeric(pivot[cov], errors="coerce")
+            if apply_fred_transforms and fred_transform_codes and cov in fred_transform_codes:
+                cov_series = apply_fred_transform_codes(
+                    data_df=pd.DataFrame({cov: cov_series}),
+                    transform_codes=fred_transform_codes,
+                    columns=[cov],
+                )[cov]
+                transformed_covariates.append(cov)
+            out[cov] = cov_series.to_numpy(dtype=float)
             covariate_columns.append(cov)
 
     out = _drop_invalid_and_fill_covariates(out=out, covariate_columns=covariate_columns)
@@ -752,6 +834,9 @@ def _build_from_long_format(
         "target_series": target_series_name,
         "target_transform": target_transform,
         "covariate_columns": covariate_columns,
+        "apply_fred_transforms": bool(apply_fred_transforms),
+        "transformed_covariates": transformed_covariates,
+        "transform_code_count": len(fred_transform_codes or {}),
     }
 
 
@@ -762,6 +847,8 @@ def _build_from_wide_format(
     source_series_candidates: Sequence[str],
     timestamp_col: str,
     include_covariates: bool,
+    apply_fred_transforms: bool,
+    fred_transform_codes: dict[str, int] | None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     wide = pdf.copy()
     row = wide.iloc[0] if len(wide) else pd.Series(dtype=object)
@@ -787,6 +874,7 @@ def _build_from_wide_format(
     out = pd.DataFrame({"item_id": target_series_name, "timestamp": timestamps, "target": target})
 
     covariate_columns: list[str] = []
+    transformed_covariates: list[str] = []
     if include_covariates:
         excluded = {timestamp_col, "id", target_series_name, source_series}
         covariate_data: dict[str, pd.Series] = {}
@@ -794,7 +882,15 @@ def _build_from_wide_format(
             if cov in excluded:
                 continue
             if _is_numeric_sequence(row.get(cov, None), expected_len=len(timestamps)):
-                covariate_data[cov] = _extract_numeric_vector(row=row, column=cov)
+                cov_series = _extract_numeric_vector(row=row, column=cov)
+                if apply_fred_transforms and fred_transform_codes and cov in fred_transform_codes:
+                    cov_series = apply_fred_transform_codes(
+                        data_df=pd.DataFrame({cov: cov_series}),
+                        transform_codes=fred_transform_codes,
+                        columns=[cov],
+                    )[cov]
+                    transformed_covariates.append(cov)
+                covariate_data[cov] = cov_series
                 covariate_columns.append(cov)
         if covariate_data:
             out = pd.concat([out, pd.DataFrame(covariate_data)], axis=1)
@@ -806,6 +902,9 @@ def _build_from_wide_format(
         "target_series": target_series_name,
         "target_transform": target_transform,
         "covariate_columns": covariate_columns,
+        "apply_fred_transforms": bool(apply_fred_transforms),
+        "transformed_covariates": transformed_covariates,
+        "transform_code_count": len(fred_transform_codes or {}),
     }
 
 

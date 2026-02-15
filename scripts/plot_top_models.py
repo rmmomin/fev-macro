@@ -25,6 +25,7 @@ from fev_macro.data import (  # noqa: E402
     build_real_gdp_target_series,
     exclude_years,
     export_local_dataset_parquet,
+    load_fred_qd_transform_codes,
     load_fev_dataset,
     reindex_to_regular_frequency,
 )
@@ -91,13 +92,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--historical_qd_dir",
         type=str,
-        default="data/historical/Historical vintages of FRED-QD 2018-05 to 2024-12",
+        default="data/historical/qd/vintages_2018_2026",
         help="Path to historical FRED-QD vintage CSVs for vintage-correct training windows.",
     )
     parser.add_argument(
         "--disable_historical_vintages",
         action="store_true",
         help="Disable historical-vintage training and use finalized data for all windows.",
+    )
+    parser.add_argument(
+        "--disable_fred_transforms",
+        action="store_true",
+        help="Disable FRED-MD/QD tcode transforms for covariates during dataset construction.",
+    )
+    parser.add_argument(
+        "--fred_transform_vintage",
+        type=str,
+        default=None,
+        help="Optional transform-code vintage month (YYYY-MM); default uses latest available historical vintage.",
     )
     parser.add_argument(
         "--vintage_fallback_to_earliest",
@@ -324,12 +336,27 @@ def main() -> None:
         dataset_revision=args.dataset_revision,
     )
 
+    apply_fred_transforms = not args.disable_fred_transforms
+    transform_vintage = pd.Period(args.fred_transform_vintage, freq="M") if args.fred_transform_vintage else None
+    fred_transform_codes: dict[str, int] = {}
+    if apply_fred_transforms:
+        try:
+            fred_transform_codes = load_fred_qd_transform_codes(
+                historical_qd_dir=args.historical_qd_dir,
+                vintage_period=transform_vintage,
+            )
+        except Exception as err:
+            print(f"Warning: unable to load FRED transform codes ({err}); continuing without transforms.")
+            apply_fred_transforms = False
+
     gdp_full_df, gdp_meta = build_real_gdp_target_series(
         dataset=dataset,
         target_series_name=args.target,
         target_transform=args.target_transform,
         source_series_candidates=args.source_series_candidates,
         include_covariates=True,
+        apply_fred_transforms=apply_fred_transforms,
+        fred_transform_codes=fred_transform_codes,
     )
     years_to_exclude = sorted({int(y) for y in (args.exclude_years or [])})
     gdp_df = exclude_years(gdp_full_df, years=years_to_exclude)
@@ -357,6 +384,7 @@ def main() -> None:
             source_series_candidates=args.source_series_candidates,
             covariate_columns=covariate_columns,
             include_covariates=True,
+            apply_fred_transforms=apply_fred_transforms,
             exclude_years_list=years_to_exclude,
             timestamp_mapping=timestamp_mapping,
             strict=not args.vintage_fallback_to_earliest,
@@ -455,6 +483,11 @@ def main() -> None:
     )
     print(f"Excluded years: {years_to_exclude}")
     print(f"Covariates used: {len(covariate_columns)}")
+    print(
+        "FRED transforms enabled: "
+        f"{apply_fred_transforms}; transform codes loaded={len(fred_transform_codes)}; "
+        f"covariates transformed={len(gdp_meta.get('transformed_covariates', []))}"
+    )
     print(f"Saved OOS predictions: {predictions_csv}")
     print(f"Saved plot: {output_path}")
 
