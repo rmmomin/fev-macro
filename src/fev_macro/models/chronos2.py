@@ -46,6 +46,8 @@ class Chronos2Model(BaseModel):
         id_col = get_task_id_column(task)
         ts_col = get_task_timestamp_column(task)
         target_col = get_task_target_column(task)
+        horizon = get_task_horizon(task)
+        item_order = get_item_order(future_data, task)
         known_covars = [
             c for c in list(getattr(task, "known_dynamic_columns", [])) if c in past_data.column_names or c in future_data.column_names
         ]
@@ -67,27 +69,34 @@ class Chronos2Model(BaseModel):
             covariate_columns=future_covars,
         )
 
-        pred_df = self.pipeline.predict_df(
-            df=context_df,
-            future_df=future_df,
-            id_column="item_id",
-            timestamp_column="timestamp",
-            target="target",
-            prediction_length=get_task_horizon(task),
-        )
-
-        point_col = self._select_point_column(pred_df)
-        horizon = get_task_horizon(task)
-        item_order = get_item_order(future_data, task)
-
         pred_map: dict[Any, np.ndarray] = {}
-        for item_id, grp in pred_df.sort_values(["item_id", "timestamp"]).groupby("item_id", sort=False):
-            arr = grp[point_col].to_numpy(dtype=float)
-            if arr.size != horizon:
-                raise ValueError(
-                    f"Chronos-2 produced horizon={arr.size} for item_id={item_id}; expected {horizon}"
-                )
-            pred_map[item_id] = arr
+        short_context_ids: list[Any] = []
+        for item_id in item_order:
+            item_ctx = context_df.loc[context_df["item_id"] == item_id, "target"]
+            if len(item_ctx) < 3:
+                short_context_ids.append(item_id)
+                last_val = float(item_ctx.iloc[-1]) if len(item_ctx) > 0 else 0.0
+                pred_map[item_id] = np.repeat(last_val, horizon).astype(float)
+
+        eligible_ids = [item_id for item_id in item_order if item_id not in short_context_ids]
+        if eligible_ids:
+            pred_df = self.pipeline.predict_df(
+                df=context_df[context_df["item_id"].isin(eligible_ids)].copy(),
+                future_df=future_df[future_df["item_id"].isin(eligible_ids)].copy(),
+                id_column="item_id",
+                timestamp_column="timestamp",
+                target="target",
+                prediction_length=horizon,
+            )
+
+            point_col = self._select_point_column(pred_df)
+            for item_id, grp in pred_df.sort_values(["item_id", "timestamp"]).groupby("item_id", sort=False):
+                arr = grp[point_col].to_numpy(dtype=float)
+                if arr.size != horizon:
+                    raise ValueError(
+                        f"Chronos-2 produced horizon={arr.size} for item_id={item_id}; expected {horizon}"
+                    )
+                pred_map[item_id] = arr
 
         for item_id in item_order:
             if item_id not in pred_map:

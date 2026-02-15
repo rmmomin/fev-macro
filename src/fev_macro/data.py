@@ -309,10 +309,19 @@ class HistoricalQuarterlyVintageProvider:
         return None
 
     def compatible_window_count(self, task: Any) -> int:
-        """Count latest windows that can be trained with a valid historical vintage."""
-        validity: list[bool] = []
+        """Count trailing evaluation windows that are usable for this provider/task."""
+        window_usable: list[bool] = []
         for window in task.iter_windows():
-            input_data = window.get_input_data()
+            try:
+                input_data = window.get_input_data()
+            except ValueError as exc:
+                # fev may surface infeasible early windows when num_windows is larger than
+                # the available history. Those windows must be excluded.
+                if "too short" in str(exc):
+                    window_usable.append(False)
+                    continue
+                raise
+
             if isinstance(input_data, tuple) and len(input_data) == 2:
                 past_data, _ = input_data
             else:
@@ -320,30 +329,17 @@ class HistoricalQuarterlyVintageProvider:
 
             cutoff = _extract_past_cutoff_timestamp(past_data=past_data, task=task)
             cutoff_actual = self.timestamp_mapping.get(pd.Timestamp(cutoff), pd.Timestamp(cutoff))
-            is_valid = self.select_vintage_period(cutoff_actual, allow_fallback=False) is not None
-            validity.append(is_valid)
+            selected = self.select_vintage_period(cutoff_actual, allow_fallback=not self.strict)
+            has_vintage = selected is not None
+            if self.strict:
+                window_usable.append(has_vintage)
+            else:
+                window_usable.append(True)
 
-        if not validity:
+        if not window_usable:
             return 0
-        if not self.strict:
-            return len(validity)
-
-        first_valid_idx: int | None = None
-        for idx, is_valid in enumerate(validity):
-            if is_valid:
-                first_valid_idx = idx
-                break
-
-        if first_valid_idx is None:
-            return 0
-
-        suffix = validity[first_valid_idx:]
-        if all(suffix):
-            return len(suffix)
-
-        # Defensive fallback: count only the trailing fully valid suffix.
         trailing = 0
-        for is_valid in reversed(validity):
+        for is_valid in reversed(window_usable):
             if is_valid:
                 trailing += 1
             else:

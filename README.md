@@ -137,9 +137,9 @@ By default, transform codes are loaded from the latest file under `--historical_
 
 - Historical quarterly vintages available: `2018-05` to `2026-01`.
 - Default benchmark request is `num_windows=100` with horizons `h=1,2,3,4`.
-- Under strict historical-vintage coverage, effective windows can be reduced automatically per horizon.
+- Default benchmark behavior enables earliest-vintage fallback (`--vintage_fallback_to_earliest`), and effective windows are reduced automatically per horizon when needed to keep windows feasible.
 
-Use `--vintage_fallback_to_earliest` to keep earlier windows by falling back to the earliest available vintage.
+Use `--no-vintage_fallback_to_earliest` to enforce strict historical-vintage coverage.
 
 ## Historical Vintage Download
 
@@ -319,8 +319,11 @@ Default benchmark CLI settings:
 - `--eval_release_csv data/panels/gdpc1_releases_first_second_third.csv`
 - `--eval_release_stages first second third`
 - `--models` full 18-model default list (see section above)
+- `--vintage_fallback_to_earliest` (enabled by default; use `--no-vintage_fallback_to_earliest` for strict coverage)
 
-### Prior benchmark snapshot (February 15, 2026)
+When requested windows are infeasible for a stage/horizon, the harness automatically reduces to the largest valid trailing window count.
+
+### Latest benchmark snapshot (February 15, 2026)
 
 Command run:
 
@@ -330,27 +333,29 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src .venv/bin/python scripts/run_
 
 Observed run details:
 
-- Target: `LOG_REAL_GDP` (`log_level`), excluding year `2020`.
-- Evaluation truth: `data/panels/gdpc1_releases_first_second_third.csv` (`first_release` stage).
-- Note: this snapshot predates the default switch to realtime SAAR truth (`first/second/third` columns) and is not directly comparable to current defaults.
-- Built task dataset: `results/log_real_gdp_dataset.parquet`.
+- Target: `LOG_REAL_GDP` (`saar_growth`), excluding year `2020`.
+- Evaluation truth: `data/panels/gdpc1_releases_first_second_third.csv` realtime SAAR columns (`first/second/third`).
+- Built task datasets:
+  - `results/log_real_gdp_dataset_first.parquet`
+  - `results/log_real_gdp_dataset_second.parquet`
+  - `results/log_real_gdp_dataset_third.parquet`
 - Training vintage source: historical FRED-QD CSV vintages at `data/historical/qd/vintages_2018_2026` (93 monthly files from `2018-05` to `2026-01`).
-- Strict coverage reduced effective windows from requested `100` to:
-  - `h=1`: `24`
-  - `h=2`: `23`
-  - `h=3`: `22`
-  - `h=4`: `21`
+- Effective windows reduced from requested `100` to:
+  - `first`: `h=1:25`, `h=2:24`, `h=3:23`, `h=4:22`
+  - `second`: `h=1:26`, `h=2:25`, `h=3:24`, `h=4:23`
+  - `third`: `h=1:25`, `h=2:24`, `h=3:23`, `h=4:22`
 
 Top leaderboard models (`results/leaderboard.csv`):
 
-- `bvar_minnesota_20`: `win_rate=0.970588`, `skill_score=0.639577`
-- `drift`: `win_rate=0.970588`, `skill_score=0.639321`
+- `mean`: `win_rate=1.000000`, `skill_score=0.237981`
+- `chronos2`: `win_rate=0.941176`, `skill_score=0.159133`
+- `ensemble_weighted_top5`: `win_rate=0.784314`, `skill_score=0.062204`
 
 Direct run with explicit output folder:
 
 ```bash
-PYTHONPATH=src .venv/bin/python scripts/run_eval.py \
-  --results_dir results/log_real_gdp_excl2020_vintage_full \
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src .venv/bin/python scripts/run_eval.py \
+  --results_dir results/log_real_gdp_realtime_default \
   --seed 0
 ```
 
@@ -370,24 +375,24 @@ make plot
 
 Snapshot source:
 
-- `results/log_real_gdp_excl2020_vintage_full/summaries.csv`
+- `results/summaries.csv`
 - Computed on February 15, 2026 from `inference_time_s` totals across tasks.
 
 Top total compute methods:
 
 | Model | Total inference seconds | Seconds per forecast |
 |---|---:|---:|
-| `xgboost` | 161.144 | 2.370 |
-| `chronos2` | 105.505 | 1.552 |
-| `ensemble_weighted_top5` | 34.802 | 0.512 |
-| `ensemble_avg_top3` | 28.616 | 0.421 |
-| `auto_arima` | 17.294 | 0.254 |
-| `random_forest` | 16.606 | 0.244 |
+| `chronos2` | 22.983 | 0.080 |
+| `ensemble_weighted_top5` | 21.318 | 0.075 |
+| `ensemble_avg_top3` | 20.735 | 0.073 |
+| `auto_arima` | 18.035 | 0.063 |
+| `random_forest` | 7.820 | 0.027 |
+| `local_trend_ssm` | 1.428 | 0.005 |
 
 Interpretation:
 
-- Tree-based boosted model (`xgboost`) and foundation model inference (`chronos2`) are the main compute bottlenecks.
-- Ensemble models are also expensive because they execute multiple member models per window.
+- Foundation model inference (`chronos2`) and ensemble models are the main compute bottlenecks.
+- In this default release-CSV run, tree models are no longer the dominant cost contributors.
 
 ## Output Artifacts
 

@@ -117,10 +117,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--vintage_fallback_to_earliest",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
             "Allow windows earlier than the first vintage to fall back to the earliest available vintage "
-            "instead of enforcing strict vintage coverage."
+            "instead of enforcing strict vintage coverage. Enabled by default; use "
+            "--no-vintage_fallback_to_earliest for strict mode."
         ),
     )
     parser.add_argument(
@@ -325,39 +327,42 @@ def main() -> None:
                 f"from {vintage_provider.historical_qd_dir}"
             )
 
-            if not args.vintage_fallback_to_earliest:
-                adjusted_tasks = []
-                for horizon, task in zip(args.horizons, tasks):
-                    compatible_windows = vintage_provider.compatible_window_count(task)
-                    if compatible_windows <= 0:
-                        raise ValueError(
-                            "No compatible windows for historical-vintage training at horizon "
-                            f"{horizon} (eval={eval_label}). Try reducing --num_windows or enable "
-                            "--vintage_fallback_to_earliest."
-                        )
+            adjusted_tasks = []
+            for horizon, task in zip(args.horizons, tasks):
+                compatible_windows = vintage_provider.compatible_window_count(task)
+                if compatible_windows <= 0:
+                    raise ValueError(
+                        "No compatible windows for historical-vintage training at horizon "
+                        f"{horizon} (eval={eval_label}). Try reducing --num_windows "
+                        "or disabling historical vintages."
+                    )
 
-                    if compatible_windows < int(args.num_windows):
-                        print(
-                            f"Reducing eval={eval_label} horizon h={horizon} windows from "
-                            f"{args.num_windows} to {compatible_windows} to enforce strict "
-                            "historical-vintage coverage."
-                        )
-                        adjusted_task = make_gdp_tasks(
-                            dataset_path=str(local_dataset_path),
-                            dataset_config=None,
-                            id_col="id",
-                            timestamp_col="timestamp",
-                            target_col="target",
-                            known_dynamic_columns=covariate_columns,
-                            horizons=[int(horizon)],
-                            num_windows=int(compatible_windows),
-                            metric=args.metric,
-                            task_prefix=task_prefix,
-                        )[0]
-                        adjusted_tasks.append(adjusted_task)
-                    else:
-                        adjusted_tasks.append(task)
-                tasks = adjusted_tasks
+                if compatible_windows < int(args.num_windows):
+                    reason = (
+                        "strict historical-vintage coverage and valid task windows"
+                        if not args.vintage_fallback_to_earliest
+                        else "valid task windows"
+                    )
+                    print(
+                        f"Reducing eval={eval_label} horizon h={horizon} windows from "
+                        f"{args.num_windows} to {compatible_windows} to enforce {reason}."
+                    )
+                    adjusted_task = make_gdp_tasks(
+                        dataset_path=str(local_dataset_path),
+                        dataset_config=None,
+                        id_col="id",
+                        timestamp_col="timestamp",
+                        target_col="target",
+                        known_dynamic_columns=covariate_columns,
+                        horizons=[int(horizon)],
+                        num_windows=int(compatible_windows),
+                        metric=args.metric,
+                        task_prefix=task_prefix,
+                    )[0]
+                    adjusted_tasks.append(adjusted_task)
+                else:
+                    adjusted_tasks.append(task)
+            tasks = adjusted_tasks
 
         all_tasks.extend(tasks)
         if vintage_provider is not None:
