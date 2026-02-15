@@ -252,7 +252,11 @@ class HistoricalQuarterlyVintageProvider:
             self.historical_qd_dir = next(iter(self.vintage_files.values())).parent.resolve()
             self.vintage_periods = sorted(self.vintage_files.keys())
         except FileNotFoundError:
-            panel_candidate = Path(qd_panel_path) if qd_panel_path is not None else Path("data/panels/fred_qd_vintage_panel.parquet")
+            panel_candidate = (
+                Path(qd_panel_path)
+                if qd_panel_path is not None
+                else Path("data/panels/fred_qd_vintage_panel_process.parquet")
+            )
             panel_candidate = panel_candidate.expanduser().resolve()
             if not panel_candidate.exists():
                 raise

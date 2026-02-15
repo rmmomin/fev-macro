@@ -175,7 +175,7 @@ class MixedFrequencyDFMModel(BaseModel):
 
     def __init__(
         self,
-        md_dataset_path: str = "data/panels/fred_qd_vintage_panel.parquet",
+        md_dataset_path: str = "data/panels/fred_md_vintage_panel_process.parquet",
         md_config: str = "local_qd_panel",
         max_monthly_covariates: int = 100,
         n_factors: int = 6,

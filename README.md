@@ -33,7 +33,7 @@ The harness is designed so models can be added modularly and compared fairly und
   - `qoq_saar_growth_realtime_first_pct`
   - `qoq_saar_growth_realtime_second_pct`
   - `qoq_saar_growth_realtime_third_pct`
-- Historical vintage source (training windows): `data/panels/fred_qd_vintage_panel.parquet` (or raw monthly vintage CSVs under `data/historical/qd/`).
+- Historical vintage source (training windows): raw monthly vintage CSVs under `data/historical/qd/`, with parquet fallback defaulting to `data/panels/fred_qd_vintage_panel_process.parquet`.
 - Target construction:
   - Default benchmark target uses release-table realtime SAAR truth directly (`realtime_qoq_saar`).
   - Optional level mode uses release-stage GDP levels (`first/second/third/latest`) transformed to:
@@ -83,12 +83,12 @@ The harness is designed so models can be added modularly and compared fairly und
 | `auto_arima` | StatsForecast AutoARIMA | Target history only (univariate) |
 | `auto_ets` | StatsForecast AutoETS exponential smoothing | Target history only (univariate) |
 | `local_trend_ssm` | Unobserved Components local trend/cycle | Target history only (univariate) |
-| `random_forest` | AR + exogenous random forest, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel.parquet` (quarterly aggregated by vintage) |
-| `xgboost` | Gradient-boosted AR + exogenous model, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel.parquet` (quarterly aggregated by vintage) |
+| `random_forest` | AR + exogenous random forest, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel_process.parquet` (quarterly aggregated by vintage) |
+| `xgboost` | Gradient-boosted AR + exogenous model, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel_process.parquet` (quarterly aggregated by vintage) |
 | `bvar_minnesota_8` | Minnesota-style shrinkage BVAR (~8 total vars including GDP) | Target + selected macro covariates (~7) from FRED-QD |
 | `bvar_minnesota_20` | Minnesota-style shrinkage BVAR (~20 total vars including GDP) | Target + selected macro covariates (~19) from FRED-QD |
 | `factor_pca_qd` | Quarterly PCA factor regression | Target lags + PCA factors from up to ~80 FRED-QD covariates |
-| `mixed_freq_dfm_md` | Mixed-frequency factor model using local vintage-panel covariates | Target lags + factors from latest local QD vintage panel (`data/panels/fred_qd_vintage_panel.parquet`) |
+| `mixed_freq_dfm_md` | Mixed-frequency factor model using local vintage-panel covariates | Target lags + factors from latest local processed MD vintage panel (`data/panels/fred_md_vintage_panel_process.parquet`) |
 | `chronos2` | Zero-shot Chronos-2 foundation model adapter | Target history + available dynamic covariates passed as context/future known covariates |
 | `ensemble_avg_top3` | Equal-weight ensemble | Drift + AutoARIMA + LocalTrendSSM predictions |
 | `ensemble_weighted_top5` | Weighted ensemble | Drift + AutoARIMA + LocalTrendSSM + FactorPCAQD + SeasonalNaive predictions |
@@ -365,6 +365,7 @@ Default benchmark CLI settings:
 - `--eval_release_csv data/panels/gdpc1_releases_first_second_third.csv`
 - `--eval_release_stages first second third`
 - `--models` full 18-model default list (see section above)
+- `--qd_vintage_panel data/panels/fred_qd_vintage_panel_process.parquet` (used as fallback if historical CSV vintages are unavailable)
 - `--vintage_fallback_to_earliest` (enabled by default; use `--no-vintage_fallback_to_earliest` for strict coverage)
 
 When requested windows are infeasible for a stage/horizon, the harness automatically reduces to the largest valid trailing window count.

@@ -109,7 +109,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--qd_vintage_panel",
         type=str,
-        default="data/panels/fred_qd_vintage_panel.parquet",
+        default="data/panels/fred_qd_vintage_panel_process.parquet",
         help=(
             "Fallback QD vintage panel parquet used when --historical_qd_dir CSV vintages are unavailable. "
             "Useful after running make panel-qd."
