@@ -343,21 +343,36 @@ You can also run default settings with:
 make latest-forecast
 ```
 
+### Using latest raw feed files (`data/latest/*.csv`)
+
+If you want to forecast from the latest raw feed files (`data/latest/fred_md_latest.csv`, `data/latest/fred_qd_latest.csv`), first build temporary one-vintage panel parquets from those CSVs and pass them to `scripts/run_latest_vintage_forecast.py`:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_latest_vintage_forecast.py \
+  --vintage_panel results/tmp_latest_qd_panel_for_2025Q4.parquet \
+  --md_vintage_panel results/tmp_latest_md_panel.parquet \
+  --vintage 2026-02 \
+  --target_quarter 2025Q4 \
+  --models naive_last mean drift seasonal_naive random_normal random_uniform random_permutation random_forest xgboost local_trend_ssm bvar_minnesota_8 bvar_minnesota_20 factor_pca_qd mixed_freq_dfm_md ensemble_avg_top3 ensemble_weighted_top5 auto_arima chronos2 \
+  --output_csv results/realtime_latest_data_2025Q4_full_models.csv
+```
+
 ## Plot 2025Q4 Forecast Comparison
 
-Create a sorted column chart (lowest to highest) for selected models' 2025Q4 q/q SAAR forecasts:
+Create a sorted column chart (lowest to highest) for 2025Q4 q/q SAAR forecasts.
+By default, the script now plots the full `run_eval.py` model list:
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/plot_2025q4_forecast_selected_models.py \
-  --input_csv results/realtime_latest_v2026m1_2025Q4_forecasts.csv \
+  --input_csv results/realtime_latest_data_2025Q4_full_models.csv \
   --target_quarter 2025Q4 \
-  --models rw_drift_log auto_ets drift theta chronos2 \
-  --output_png results/forecast_2025Q4_qoq_saar_rw_autoets_drift_theta_chronos2.png
+  --output_png results/forecast_2025Q4_qoq_saar_latest_data_full_models.png
 ```
 
 Output:
 
-- `results/forecast_2025Q4_qoq_saar_rw_autoets_drift_theta_chronos2.png`
+- `results/forecast_2025Q4_qoq_saar_latest_data_full_models.png`
+- optional filtered view (for example, drift-and-higher): `results/forecast_2025Q4_qoq_saar_latest_data_ge_1p16.png`
 
 ## Running The Benchmark
 
