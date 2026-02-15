@@ -21,7 +21,7 @@ Benchmark mode uses a finalized dataset/task (`scripts/run_eval.py`), while real
 This repository benchmarks multiple forecasting approaches on the same task definition and backtest protocol:
 
 - Core benchmark target: `LOG_REAL_GDP` (log real GDP level).
-- Evaluation: multi-horizon rolling windows (`h = 1, 2, 4`) with comparable metrics and leaderboard tables.
+- Evaluation: multi-horizon rolling windows (`h = 1, 2, 3, 4`) with comparable metrics and leaderboard tables.
 - Visualization: convert log-level forecasts to q/q SAAR growth for train/OOS plotting.
 
 The harness is designed so models can be added modularly and compared fairly under identical windows, metrics, and data handling.
@@ -132,10 +132,8 @@ CLI controls:
 ### Strict vintage coverage
 
 - Historical quarterly vintages available: `2018-05` to `2026-01`.
-- With default request `num_windows=80`, strict coverage reduces effective windows to:
-  - `h=1`: `24`
-  - `h=2`: `23`
-  - `h=4`: `21`
+- Default benchmark request is `num_windows=100` with horizons `h=1,2,3,4`.
+- Under strict historical-vintage coverage, effective windows can be reduced automatically per horizon.
 
 Use `--vintage_fallback_to_earliest` to keep earlier windows by falling back to the earliest available vintage.
 
@@ -300,6 +298,43 @@ Run default full benchmark:
 ```bash
 make run
 ```
+
+Equivalent direct command (uses default full model list):
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_eval.py
+```
+
+Default benchmark CLI settings:
+
+- `--horizons 1 2 3 4`
+- `--num_windows 100`
+- `--metric RMSE`
+- `--models` full 18-model default list (see section above)
+
+### Latest default benchmark snapshot (February 15, 2026)
+
+Command run:
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src .venv/bin/python scripts/run_eval.py
+```
+
+Observed run details:
+
+- Target: `LOG_REAL_GDP` (`log_level`), excluding year `2020`.
+- Built task dataset: `results/log_real_gdp_dataset.parquet`.
+- Training vintage source: historical FRED-QD CSV vintages at `data/historical/qd/vintages_2018_2026` (93 monthly files from `2018-05` to `2026-01`).
+- Strict coverage reduced effective windows from requested `100` to:
+  - `h=1`: `24`
+  - `h=2`: `23`
+  - `h=3`: `22`
+  - `h=4`: `21`
+
+Top leaderboard models (`results/leaderboard.csv`):
+
+- `bvar_minnesota_20`: `win_rate=0.970588`, `skill_score=0.639577`
+- `drift`: `win_rate=0.970588`, `skill_score=0.639321`
 
 Direct run with explicit output folder:
 

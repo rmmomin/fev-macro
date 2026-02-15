@@ -47,8 +47,8 @@ def parse_args() -> argparse.Namespace:
         choices=sorted(SUPPORTED_TARGET_TRANSFORMS),
         help="Target transform when target series is not directly available.",
     )
-    parser.add_argument("--horizons", type=int, nargs="+", default=[1, 2, 4])
-    parser.add_argument("--num_windows", type=int, default=80)
+    parser.add_argument("--horizons", type=int, nargs="+", default=[1, 2, 3, 4])
+    parser.add_argument("--num_windows", type=int, default=100)
     parser.add_argument("--metric", type=str, default="RMSE")
     parser.add_argument(
         "--models",
