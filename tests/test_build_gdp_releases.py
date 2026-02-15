@@ -10,14 +10,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.build_gdp_releases import build_release_dataset
+from scripts.build_gdp_releases import (  # noqa: E402
+    build_release_dataset,
+    load_qd_vintage_series_panel,
+    validate_release_table,
+)
 
 
 def _saar(curr: float, prev: float) -> float:
     return float(100.0 * ((curr / prev) ** 4 - 1.0))
 
 
-def test_build_release_dataset_realtime_growth_uses_previous_level_asof_current_release() -> None:
+def test_build_release_dataset_realtime_growth_uses_single_vintage_snapshot() -> None:
     wide = pd.DataFrame(
         {
             "observation_date": ["2024-01-01", "2024-04-01"],
@@ -31,15 +35,15 @@ def test_build_release_dataset_realtime_growth_uses_previous_level_asof_current_
     qd_panel = pd.DataFrame(
         {
             "vintage": [
-                "2024-05",
-                "2024-05",
                 "2024-06",
                 "2024-06",
                 "2024-07",
                 "2024-07",
+                "2024-08",
+                "2024-08",
             ],
             "vintage_timestamp": pd.to_datetime(
-                ["2024-05-01", "2024-05-01", "2024-06-01", "2024-06-01", "2024-07-01", "2024-07-01"]
+                ["2024-06-01", "2024-06-01", "2024-07-01", "2024-07-01", "2024-08-01", "2024-08-01"]
             ),
             "quarter": pd.PeriodIndex(["2024Q1", "2024Q2", "2024Q1", "2024Q2", "2024Q1", "2024Q2"], freq="Q-DEC"),
             "quarter_ord": pd.PeriodIndex(["2024Q1", "2024Q2", "2024Q1", "2024Q2", "2024Q1", "2024Q2"], freq="Q-DEC").astype(
@@ -49,48 +53,79 @@ def test_build_release_dataset_realtime_growth_uses_previous_level_asof_current_
         }
     )
 
-    out = build_release_dataset(wide=wide, series="GDPC1", qd_panel=qd_panel)
+    out = build_release_dataset(wide=wide, series="GDPC1", qd_panel=qd_panel, vintage_select="next")
 
-    # First row has no previous quarter for q/q growth.
     assert np.isnan(out.loc[0, "qoq_saar_growth_realtime_first_pct"])
     assert np.isnan(out.loc[0, "qoq_saar_growth_realtime_second_pct"])
     assert np.isnan(out.loc[0, "qoq_saar_growth_realtime_third_pct"])
 
-    # For 2024Q2, previous-quarter levels are taken as-of each release vintage:
-    # first uses 2024-05-30 vintage previous level=101
-    # second uses 2024-06-27 vintage previous level=102
-    # third uses 2024-07-25 vintage previous level=103
+    # For 2024Q2, each stage maps to the next available monthly panel vintage:
+    # first: release 2024-05-30 -> panel 2024-06, second: 2024-06-27 -> 2024-07,
+    # third: 2024-07-25 -> 2024-08.
     assert np.isclose(out.loc[1, "qoq_saar_growth_realtime_first_pct"], _saar(110.0, 101.0))
     assert np.isclose(out.loc[1, "qoq_saar_growth_realtime_second_pct"], _saar(111.0, 102.0))
     assert np.isclose(out.loc[1, "qoq_saar_growth_realtime_third_pct"], _saar(112.0, 103.0))
     assert np.isclose(out.loc[1, "qoq_growth_realtime_first_pct"], (110.0 / 101.0 - 1.0) * 100.0)
 
 
-def test_realtime_growth_regression_quarters_2023_no_series_break_spikes() -> None:
-    path = ROOT / "data" / "panels" / "gdpc1_releases_first_second_third.csv"
-    if not path.exists():
+def test_reindex_break_regression_uses_same_vintage_for_numerator_and_denominator() -> None:
+    # v0 and v1 describe identical real growth, but v1 is 10% higher in level due to reindexing.
+    wide = pd.DataFrame(
+        {
+            "observation_date": ["2023-01-01", "2023-04-01"],
+            "GDPC1_20230525": [100.0, np.nan],
+            "GDPC1_20230830": [110.0, 110.0],
+        }
+    )
+
+    qd_panel = pd.DataFrame(
+        {
+            "vintage": ["2023-06", "2023-09", "2023-09"],
+            "vintage_timestamp": pd.to_datetime(["2023-06-01", "2023-09-01", "2023-09-01"]),
+            "quarter": pd.PeriodIndex(["2023Q1", "2023Q1", "2023Q2"], freq="Q-DEC"),
+            "quarter_ord": pd.PeriodIndex(["2023Q1", "2023Q1", "2023Q2"], freq="Q-DEC").astype("int64"),
+            "value": [100.0, 110.0, 110.0],
+        }
+    )
+
+    out = build_release_dataset(wide=wide, series="GDPC1", qd_panel=qd_panel, vintage_select="next")
+
+    # Old stitched-level approach mixes vintages and creates a fake jump.
+    old_stitched = _saar(float(out.loc[1, "first_release"]), float(out.loc[0, "first_release"]))
+    assert old_stitched > 40.0
+
+    # New method uses one panel snapshot (v1) for both q and q-1, avoiding the break.
+    assert np.isclose(float(out.loc[1, "qoq_saar_growth_realtime_first_pct"]), 0.0)
+
+
+def test_validation_smoke_no_2023_q2_q3_spike_flags_with_panel_growth(tmp_path: Path) -> None:
+    release_path = ROOT / "data" / "panels" / "gdpc1_releases_first_second_third.csv"
+    panel_path = ROOT / "data" / "panels" / "fred_qd_vintage_panel.parquet"
+    if not release_path.exists() or not panel_path.exists():
         return
 
-    df = pd.read_csv(path)
-    required = {
-        "observation_date",
-        "qoq_saar_growth_realtime_first_pct",
-        "qoq_saar_growth_realtime_third_pct",
-    }
-    missing = sorted(required.difference(df.columns))
-    if missing:
-        raise AssertionError(f"Missing realtime growth columns in release CSV: {missing}")
+    try:
+        panel_df = load_qd_vintage_series_panel(panel_path=panel_path, series="GDPC1")
+    except RuntimeError as exc:
+        if "parquet engine" in str(exc):
+            return
+        raise
 
-    df["observation_date"] = pd.to_datetime(df["observation_date"], errors="coerce")
-    row_2023q2 = df.loc[df["observation_date"] == pd.Timestamp("2023-04-01")]
-    row_2023q3 = df.loc[df["observation_date"] == pd.Timestamp("2023-07-01")]
-    if row_2023q2.empty or row_2023q3.empty:
-        return
+    releases_df = pd.read_csv(release_path)
+    releases_df["observation_date"] = pd.to_datetime(releases_df["observation_date"], errors="coerce")
+    releases_df = releases_df.loc[releases_df["observation_date"] >= pd.Timestamp("2018-01-01")].copy()
 
-    v_third_2023q2 = float(row_2023q2["qoq_saar_growth_realtime_third_pct"].iloc[0])
-    v_first_2023q3 = float(row_2023q3["qoq_saar_growth_realtime_first_pct"].iloc[0])
+    report_path = tmp_path / "gdpc1_release_validation_report.csv"
+    report_df, _summary = validate_release_table(
+        releases_df=releases_df,
+        panel_df=panel_df,
+        vintage_select="next",
+        report_path=report_path,
+    )
 
-    assert np.isfinite(v_third_2023q2)
-    assert np.isfinite(v_first_2023q3)
-    assert abs(v_third_2023q2) < 15.0
-    assert abs(v_first_2023q3) < 15.0
+    assert report_path.exists()
+    spike_rows = report_df.loc[
+        report_df["flag_type"].isin({"spike_abs_gt_15", "spike_delta_gt_12"})
+        & report_df["quarter"].isin({"2023Q2", "2023Q3"})
+    ]
+    assert spike_rows.empty

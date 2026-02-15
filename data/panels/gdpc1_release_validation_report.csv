@@ -1,0 +1,3 @@
+flag_type,quarter,stage,observation_date,release_date,selected_vintage,selected_vintage_label,qoq_saar_growth_pct,growth_delta_pct,panel_y_q,panel_y_qm1,stage_release_level,panel_to_release_ratio
+ratio_outside_0p98_1p02,2018Q1,third,2018-01-01,2018-06-28,2018-07-01,2018-07,2.2176438767141926,-0.6703467071798919,18323.963,18223.758,17371.854,1.054807564005546
+ratio_outside_0p98_1p02,2023Q2,second,2023-04-01,2023-08-30,2023-09-01,2023-09,2.060216621403499,0.058110929049570714,22225.35,22112.329,20386.467,1.0902011613880913

@@ -91,17 +91,50 @@ def main() -> int:
         )
 
     df = pd.read_csv(input_csv)
-    required_cols = {"observation_date", "first_release", "second_release", "third_release"}
-    missing = sorted(required_cols.difference(df.columns))
-    if missing:
-        raise ValueError(f"Input CSV missing required columns: {missing}")
+    if "observation_date" not in df.columns:
+        raise ValueError("Input CSV missing required column: observation_date")
 
     df["observation_date"] = pd.to_datetime(df["observation_date"], errors="coerce")
     df = df.dropna(subset=["observation_date"]).sort_values("observation_date").reset_index(drop=True)
 
-    df["first_growth"] = _growth(df["first_release"], metric=args.metric)
-    df["second_growth"] = _growth(df["second_release"], metric=args.metric)
-    df["third_growth"] = _growth(df["third_release"], metric=args.metric)
+    if args.metric == "qoq":
+        realtime_cols = {
+            "first": "qoq_growth_realtime_first_pct",
+            "second": "qoq_growth_realtime_second_pct",
+            "third": "qoq_growth_realtime_third_pct",
+        }
+    else:
+        realtime_cols = {
+            "first": "qoq_saar_growth_realtime_first_pct",
+            "second": "qoq_saar_growth_realtime_second_pct",
+            "third": "qoq_saar_growth_realtime_third_pct",
+        }
+
+    has_realtime_cols = all(col in df.columns for col in realtime_cols.values())
+    use_realtime_cols = False
+    if has_realtime_cols:
+        first_rt = pd.to_numeric(df[realtime_cols["first"]], errors="coerce")
+        second_rt = pd.to_numeric(df[realtime_cols["second"]], errors="coerce")
+        third_rt = pd.to_numeric(df[realtime_cols["third"]], errors="coerce")
+        use_realtime_cols = not (first_rt.isna().all() and second_rt.isna().all() and third_rt.isna().all())
+
+    if use_realtime_cols:
+        df["first_growth"] = pd.to_numeric(df[realtime_cols["first"]], errors="coerce")
+        df["second_growth"] = pd.to_numeric(df[realtime_cols["second"]], errors="coerce")
+        df["third_growth"] = pd.to_numeric(df[realtime_cols["third"]], errors="coerce")
+        growth_source = "panel_asof_stage_release"
+    else:
+        required_level_cols = {"first_release", "second_release", "third_release"}
+        missing_levels = sorted(required_level_cols.difference(df.columns))
+        if missing_levels:
+            raise ValueError(
+                "Input CSV missing release-level columns needed for fallback growth construction: "
+                f"{missing_levels}"
+            )
+        df["first_growth"] = _growth(df["first_release"], metric=args.metric)
+        df["second_growth"] = _growth(df["second_release"], metric=args.metric)
+        df["third_growth"] = _growth(df["third_release"], metric=args.metric)
+        growth_source = "stitched_release_levels_fallback"
 
     start_period = pd.Period(args.start_quarter, freq="Q")
     start_ts = pd.Timestamp(start_period.start_time)
@@ -134,6 +167,17 @@ def main() -> int:
         title_metric = "q/q SAAR %"
 
     ax.set_title(f"Real GDP (GDPC1) Growth by Release Vintage: {title_metric} ({args.start_quarter} onward)")
+    if use_realtime_cols and args.metric == "qoq_saar":
+        ax.text(
+            0.5,
+            1.03,
+            "growth computed using GDPC1 from fred_qd_vintage_panel as-of stage release date",
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            color="#4d4d4d",
+        )
     ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.7)
     ax.legend()
     ax.grid(axis="y", linestyle="--", alpha=0.3)
@@ -149,6 +193,7 @@ def main() -> int:
         f"Date range: {plot_df['observation_date'].min().date()} "
         f"to {plot_df['observation_date'].max().date()}"
     )
+    print(f"Growth source: {growth_source}")
 
     return 0
 

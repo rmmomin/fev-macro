@@ -33,6 +33,9 @@ The harness is designed so models can be added modularly and compared fairly und
   - `qoq_saar_growth_realtime_first_pct`
   - `qoq_saar_growth_realtime_second_pct`
   - `qoq_saar_growth_realtime_third_pct`
+- Realtime SAAR construction for each quarter/stage uses one panel snapshot from `data/panels/fred_qd_vintage_panel.parquet` (same selected vintage for numerator and denominator):
+  - `g_{q,s} = 100 * ((GDPC1_v(q,s) / GDPC1_v(q-1,s))^4 - 1)`
+  - Default vintage mapping is `--vintage_select next` (earliest panel vintage timestamp on/after release date).
 - Historical vintage source (training windows): raw monthly vintage CSVs under `data/historical/qd/`, with parquet fallback defaulting to `data/panels/fred_qd_vintage_panel_process.parquet`.
 - Target construction:
   - Default benchmark target uses release-table realtime SAAR truth directly (`realtime_qoq_saar`).
@@ -173,6 +176,38 @@ Outputs:
 
 - `data/panels/fred_md_vintage_panel.parquet`
 - `data/panels/fred_qd_vintage_panel.parquet`
+
+## Build GDP Release Truth Table
+
+Build first/second/third release levels plus realtime q/q and q/q SAAR growth columns:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/build_gdp_releases.py \
+  --series GDPC1 \
+  --vintage_panel_path data/panels/fred_qd_vintage_panel.parquet \
+  --vintage_select next \
+  --validate
+```
+
+Important flags:
+
+- `--vintage_select {next,prev}`: map stage release date to panel vintage (`next` default).
+- `--validate/--no-validate`: run construction checks (default enabled).
+- `--fail_on_validate`: exit code `2` when spike flags are found.
+
+Validation checks include:
+
+- spike/scale-break flags on realtime SAAR growth (`abs(g) > 15`) for 2010+ excluding shock-quarter whitelist (`2020Q2`, `2020Q3`)
+- jump flags (`abs(g_q - g_{q-1}) > 12`) excluding transitions touching shock whitelist quarters
+- panel-vs-release level ratio mismatch flags for 2018+ (`ratio` outside `[0.98, 1.02]`)
+- missing panel coverage flags for required quarters at the selected vintage
+
+Outputs:
+
+- `data/panels/gdpc1_releases_first_second_third.csv`
+- `data/panels/gdpc1_release_validation_report.csv`
+
+`scripts/plot_gdp_release_growth.py` now prefers these realtime growth columns (when present) instead of recomputing from stitched release levels.
 
 ## Fetch Latest FRED MD/QD (Month-End Indexed)
 

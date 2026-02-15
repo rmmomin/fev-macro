@@ -4,9 +4,12 @@
 The script downloads ALFRED vintage data for a series (default: GDPC1), extracts
 first/second/third available releases per observation date, and adds q/q growth
 columns computed from the latest-available estimate for the current and previous
-quarter. It also computes realtime q/q SAAR growth for first/second/third
-releases using the previous-quarter level available as-of each current release
-vintage date.
+quarter.
+
+Realtime q/q and q/q SAAR growth columns are built from a single as-of snapshot
+in the FRED-QD vintage panel for each release stage (first/second/third), so the
+current-quarter and previous-quarter denominator levels are on the same scale.
+If realtime growth columns already exist, they are overwritten.
 """
 
 from __future__ import annotations
@@ -24,6 +27,29 @@ import requests
 
 ALFRED_HOST = "https://alfred.stlouisfed.org"
 DEFAULT_QD_VINTAGE_PANEL_PATH = "data/panels/fred_qd_vintage_panel.parquet"
+DEFAULT_VALIDATION_REPORT_PATH = "data/panels/gdpc1_release_validation_report.csv"
+STAGES = ("first", "second", "third")
+STAGE_RELEASE_DATE_COLS = {
+    "first": "first_release_date",
+    "second": "second_release_date",
+    "third": "third_release_date",
+}
+STAGE_RELEASE_LEVEL_COLS = {
+    "first": "first_release",
+    "second": "second_release",
+    "third": "third_release",
+}
+STAGE_QOQ_COLS = {
+    "first": "qoq_growth_realtime_first_pct",
+    "second": "qoq_growth_realtime_second_pct",
+    "third": "qoq_growth_realtime_third_pct",
+}
+STAGE_QOQ_SAAR_COLS = {
+    "first": "qoq_saar_growth_realtime_first_pct",
+    "second": "qoq_saar_growth_realtime_second_pct",
+    "third": "qoq_saar_growth_realtime_third_pct",
+}
+DEFAULT_SPIKE_SHOCK_WHITELIST = {"2020Q2", "2020Q3"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -67,6 +93,27 @@ def parse_args() -> argparse.Namespace:
             "Path to FRED-QD vintage panel parquet used to compute realtime q/q SAAR growth "
             "from as-of GDPC1 levels."
         ),
+    )
+    parser.add_argument(
+        "--vintage_select",
+        choices=["next", "prev"],
+        default="next",
+        help=(
+            "Map release date to panel vintage with either the earliest vintage at/after "
+            "the date ('next') or the latest vintage at/before the date ('prev')."
+        ),
+    )
+    parser.add_argument(
+        "--validate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run release-construction validation checks (default: enabled).",
+    )
+    parser.add_argument(
+        "--fail_on_validate",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Exit code 2 when validation finds spike flags.",
     )
     return parser.parse_args()
 
@@ -170,16 +217,44 @@ def load_qd_vintage_series_panel(panel_path: str | Path, series: str) -> pd.Data
             f"{panel_path}. Build it with `make panel-qd` or provide --vintage_panel_path."
         )
 
-    panel = pd.read_parquet(panel_path)
-    required = {"vintage", "vintage_timestamp", "timestamp", series}
+    try:
+        panel = pd.read_parquet(panel_path)
+    except ImportError as exc:
+        raise RuntimeError(
+            "Unable to read parquet panel because no parquet engine is installed. "
+            "Install one with `pip install pyarrow` (recommended) or `pip install fastparquet`."
+        ) from exc
+
+    required = {"timestamp", series}
     missing = sorted(required.difference(panel.columns))
     if missing:
         raise ValueError(f"QD vintage panel missing required columns {missing}: {panel_path}")
 
-    out = panel[["vintage", "timestamp", series, "vintage_timestamp"]].copy()
-    out["vintage"] = out["vintage"].astype(str)
+    if "vintage_timestamp" not in panel.columns and "vintage" not in panel.columns:
+        raise ValueError(
+            "QD vintage panel must include either 'vintage_timestamp' or 'vintage' (YYYY-MM): "
+            f"{panel_path}"
+        )
+
+    out = pd.DataFrame(index=panel.index)
+    out["timestamp"] = pd.to_datetime(panel["timestamp"], errors="coerce")
+    out["value"] = pd.to_numeric(panel[series], errors="coerce")
+
+    if "vintage_timestamp" in panel.columns:
+        out["vintage_timestamp"] = pd.to_datetime(panel["vintage_timestamp"], errors="coerce")
+    else:
+        out["vintage_timestamp"] = pd.to_datetime(
+            panel["vintage"].astype(str) + "-01",
+            errors="coerce",
+        )
+
+    if "vintage" in panel.columns:
+        out["vintage"] = panel["vintage"].astype(str)
+    else:
+        out["vintage"] = out["vintage_timestamp"].dt.to_period("M").astype(str)
+    out["vintage"] = out["vintage"].replace({"nan": np.nan, "NaT": np.nan})
+
     out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
-    out["value"] = pd.to_numeric(out[series], errors="coerce")
     out["vintage_timestamp"] = pd.to_datetime(out["vintage_timestamp"], errors="coerce")
     out["quarter"] = pd.PeriodIndex(out["timestamp"], freq="Q-DEC")
     out["quarter_ord"] = out["quarter"].astype("int64")
@@ -190,137 +265,205 @@ def load_qd_vintage_series_panel(panel_path: str | Path, series: str) -> pd.Data
     return out[["vintage", "vintage_timestamp", "quarter", "quarter_ord", "value"]]
 
 
+def select_panel_vintage(
+    release_date: pd.Timestamp | str | np.datetime64 | None,
+    panel_vintage_timestamps: pd.DatetimeIndex,
+    vintage_select: str = "next",
+) -> pd.Timestamp | None:
+    if vintage_select not in {"next", "prev"}:
+        raise ValueError(f"Unsupported vintage_select={vintage_select!r}; expected one of ['next', 'prev'].")
+    if release_date is None or pd.isna(release_date):
+        return pd.NaT
+    if len(panel_vintage_timestamps) == 0:
+        return pd.NaT
+
+    release_ts = pd.Timestamp(release_date)
+    if pd.isna(release_ts):
+        return pd.NaT
+
+    if vintage_select == "next":
+        idx = int(panel_vintage_timestamps.searchsorted(release_ts, side="left"))
+        if idx >= len(panel_vintage_timestamps):
+            return pd.NaT
+        return pd.Timestamp(panel_vintage_timestamps[idx])
+
+    idx = int(panel_vintage_timestamps.searchsorted(release_ts, side="right")) - 1
+    if idx < 0:
+        return pd.NaT
+    return pd.Timestamp(panel_vintage_timestamps[idx])
+
+
+def _build_realtime_stage_table(
+    releases_df: pd.DataFrame,
+    qd_panel: pd.DataFrame,
+    vintage_select: str,
+) -> pd.DataFrame:
+    required_cols = {"observation_date", *STAGE_RELEASE_DATE_COLS.values(), *STAGE_RELEASE_LEVEL_COLS.values()}
+    missing_release_cols = sorted(required_cols.difference(releases_df.columns))
+    if missing_release_cols:
+        raise ValueError(f"Release table missing columns required for realtime growth: {missing_release_cols}")
+
+    obs_dates = pd.to_datetime(releases_df["observation_date"], errors="coerce")
+    quarter = pd.PeriodIndex(obs_dates, freq="Q-DEC")
+    quarter_ord = quarter.astype("int64")
+    base = pd.DataFrame(
+        {
+            "observation_date": obs_dates,
+            "quarter": quarter.astype(str),
+            "quarter_ord": quarter_ord,
+            "prev_quarter_ord": quarter_ord - 1,
+        }
+    )
+
+    stage_frames: list[pd.DataFrame] = []
+    for stage in STAGES:
+        frame = base.copy()
+        frame["stage"] = stage
+        frame["release_date"] = pd.to_datetime(releases_df[STAGE_RELEASE_DATE_COLS[stage]], errors="coerce")
+        frame["stage_release_level"] = pd.to_numeric(releases_df[STAGE_RELEASE_LEVEL_COLS[stage]], errors="coerce")
+        stage_frames.append(frame)
+
+    stage_table = pd.concat(stage_frames, axis=0, ignore_index=True)
+    stage_table = stage_table.sort_values(["observation_date", "stage"]).reset_index(drop=True)
+
+    if qd_panel.empty:
+        stage_table["selected_vintage"] = pd.NaT
+        stage_table["selected_vintage_label"] = np.nan
+        stage_table["panel_y_q"] = np.nan
+        stage_table["panel_y_qm1"] = np.nan
+        stage_table["qoq_growth_pct"] = np.nan
+        stage_table["qoq_saar_growth_pct"] = np.nan
+        stage_table["panel_to_release_ratio"] = np.nan
+        return stage_table
+
+    panel = qd_panel.copy()
+    expected_panel_cols = {"vintage_timestamp", "quarter_ord", "value"}
+    missing_panel_cols = sorted(expected_panel_cols.difference(panel.columns))
+    if missing_panel_cols:
+        raise ValueError(f"QD panel missing required columns {missing_panel_cols} for realtime growth.")
+
+    panel["vintage_timestamp"] = pd.to_datetime(panel["vintage_timestamp"], errors="coerce")
+    panel["quarter_ord"] = pd.to_numeric(panel["quarter_ord"], errors="coerce")
+    panel["value"] = pd.to_numeric(panel["value"], errors="coerce")
+    if "vintage" not in panel.columns:
+        panel["vintage"] = panel["vintage_timestamp"].dt.to_period("M").astype(str)
+
+    panel = panel.dropna(subset=["vintage_timestamp", "quarter_ord", "value"]).copy()
+    panel["quarter_ord"] = panel["quarter_ord"].astype("int64")
+    panel = panel.sort_values(["vintage_timestamp", "quarter_ord"]).reset_index(drop=True)
+    panel = panel.drop_duplicates(subset=["vintage_timestamp", "quarter_ord"], keep="last")
+
+    panel_vintage_timestamps = pd.DatetimeIndex(
+        panel["vintage_timestamp"].drop_duplicates().sort_values().to_numpy(dtype="datetime64[ns]")
+    )
+    stage_table["selected_vintage"] = stage_table["release_date"].map(
+        lambda d: select_panel_vintage(
+            release_date=d,
+            panel_vintage_timestamps=panel_vintage_timestamps,
+            vintage_select=vintage_select,
+        )
+    )
+    stage_table["selected_vintage"] = pd.to_datetime(stage_table["selected_vintage"], errors="coerce")
+
+    vintage_labels = (
+        panel[["vintage_timestamp", "vintage"]]
+        .drop_duplicates(subset=["vintage_timestamp"], keep="last")
+        .rename(columns={"vintage": "selected_vintage_label"})
+    )
+    stage_table = stage_table.merge(
+        vintage_labels,
+        left_on="selected_vintage",
+        right_on="vintage_timestamp",
+        how="left",
+    ).drop(columns=["vintage_timestamp"], errors="ignore")
+
+    panel_cur = panel[["vintage_timestamp", "quarter_ord", "value"]].rename(
+        columns={
+            "vintage_timestamp": "selected_vintage",
+            "value": "panel_y_q",
+        }
+    )
+    stage_table = stage_table.merge(panel_cur, on=["selected_vintage", "quarter_ord"], how="left")
+
+    panel_prev = panel[["vintage_timestamp", "quarter_ord", "value"]].rename(
+        columns={
+            "vintage_timestamp": "selected_vintage",
+            "quarter_ord": "prev_quarter_ord",
+            "value": "panel_y_qm1",
+        }
+    )
+    stage_table = stage_table.merge(panel_prev, on=["selected_vintage", "prev_quarter_ord"], how="left")
+
+    valid = (
+        stage_table["selected_vintage"].notna()
+        & stage_table["panel_y_q"].notna()
+        & stage_table["panel_y_qm1"].notna()
+        & np.isfinite(stage_table["panel_y_q"])
+        & np.isfinite(stage_table["panel_y_qm1"])
+        & (stage_table["panel_y_q"] > 0)
+        & (stage_table["panel_y_qm1"] > 0)
+    )
+    ratio = stage_table["panel_y_q"] / stage_table["panel_y_qm1"]
+    stage_table["qoq_growth_pct"] = np.where(valid, (ratio - 1.0) * 100.0, np.nan)
+    stage_table["qoq_saar_growth_pct"] = np.where(valid, (ratio.pow(4) - 1.0) * 100.0, np.nan)
+
+    level_ratio_valid = (
+        stage_table["stage_release_level"].notna()
+        & np.isfinite(stage_table["stage_release_level"])
+        & (stage_table["stage_release_level"] != 0.0)
+        & stage_table["panel_y_q"].notna()
+        & np.isfinite(stage_table["panel_y_q"])
+    )
+    stage_table["panel_to_release_ratio"] = np.where(
+        level_ratio_valid,
+        stage_table["panel_y_q"] / stage_table["stage_release_level"],
+        np.nan,
+    )
+
+    return stage_table
+
+
 def _compute_realtime_saar_from_panel(
     out: pd.DataFrame,
     qd_panel: pd.DataFrame,
-) -> pd.DataFrame:
-    if qd_panel.empty:
-        out["qoq_growth_realtime_first_pct"] = np.nan
-        out["qoq_growth_realtime_second_pct"] = np.nan
-        out["qoq_growth_realtime_third_pct"] = np.nan
-        out["qoq_saar_growth_realtime_first_pct"] = np.nan
-        out["qoq_saar_growth_realtime_second_pct"] = np.nan
-        out["qoq_saar_growth_realtime_third_pct"] = np.nan
-        return out
-
-    release_long = out[
-        [
-            "observation_date",
-            "first_release_date",
-            "second_release_date",
-            "third_release_date",
-        ]
-    ].copy()
-    release_long = release_long.melt(
-        id_vars=["observation_date"],
-        value_vars=["first_release_date", "second_release_date", "third_release_date"],
-        var_name="release_stage_col",
-        value_name="asof_date",
-    )
-    stage_map = {
-        "first_release_date": "first",
-        "second_release_date": "second",
-        "third_release_date": "third",
-    }
-    release_long["stage"] = release_long["release_stage_col"].map(stage_map)
-    release_long["observation_date"] = pd.to_datetime(release_long["observation_date"], errors="coerce")
-    release_long["asof_date"] = pd.to_datetime(release_long["asof_date"], errors="coerce")
-    release_long["quarter"] = pd.PeriodIndex(release_long["observation_date"], freq="Q-DEC")
-    release_long["quarter_ord"] = release_long["quarter"].astype("int64")
-    release_long["prev_quarter_ord"] = release_long["quarter_ord"] - 1
-    release_long = release_long.sort_values("asof_date").reset_index(drop=True)
-
-    vintage_calendar = (
-        qd_panel[["vintage_timestamp"]]
-        .drop_duplicates()
-        .sort_values("vintage_timestamp")
-        .reset_index(drop=True)
-    )
-    release_long_valid = release_long.loc[release_long["asof_date"].notna()].copy()
-    release_long_missing = release_long.loc[release_long["asof_date"].isna()].copy()
-    release_long_missing["vintage_timestamp"] = pd.NaT
-
-    if not release_long_valid.empty:
-        release_long_valid = pd.merge_asof(
-            release_long_valid,
-            vintage_calendar,
-            left_on="asof_date",
-            right_on="vintage_timestamp",
-            direction="backward",
-        )
-
-    release_long = pd.concat([release_long_valid, release_long_missing], axis=0, ignore_index=True)
-
-    panel_cur = qd_panel[["vintage_timestamp", "quarter_ord", "value"]].rename(columns={"value": "y_q"})
-    release_long = release_long.merge(
-        panel_cur,
-        on=["vintage_timestamp", "quarter_ord"],
-        how="left",
+    vintage_select: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    stage_table = _build_realtime_stage_table(
+        releases_df=out,
+        qd_panel=qd_panel,
+        vintage_select=vintage_select,
     )
 
-    panel_prev = qd_panel[["vintage_timestamp", "quarter_ord", "value"]].rename(
-        columns={"quarter_ord": "prev_quarter_ord", "value": "y_qm1"}
-    )
-    release_long = release_long.merge(
-        panel_prev,
-        on=["vintage_timestamp", "prev_quarter_ord"],
-        how="left",
-    )
-
-    valid = (
-        release_long["asof_date"].notna()
-        & release_long["vintage_timestamp"].notna()
-        & release_long["y_q"].notna()
-        & release_long["y_qm1"].notna()
-        & np.isfinite(release_long["y_q"])
-        & np.isfinite(release_long["y_qm1"])
-        & (release_long["y_q"] > 0)
-        & (release_long["y_qm1"] > 0)
-    )
-    ratio = release_long["y_q"] / release_long["y_qm1"]
-    release_long["qoq_growth_pct"] = np.where(valid, (ratio - 1.0) * 100.0, np.nan)
-    release_long["qoq_saar_growth_pct"] = np.where(valid, (ratio.pow(4) - 1.0) * 100.0, np.nan)
+    out = out.copy()
+    out = out.drop(columns=[*STAGE_QOQ_COLS.values(), *STAGE_QOQ_SAAR_COLS.values()], errors="ignore")
 
     qoq_pivot = (
-        release_long.pivot_table(index="observation_date", columns="stage", values="qoq_growth_pct", aggfunc="first")
-        .rename(
-            columns={
-                "first": "qoq_growth_realtime_first_pct",
-                "second": "qoq_growth_realtime_second_pct",
-                "third": "qoq_growth_realtime_third_pct",
-            }
-        )
+        stage_table.pivot_table(index="observation_date", columns="stage", values="qoq_growth_pct", aggfunc="first")
+        .rename(columns=STAGE_QOQ_COLS)
         .reset_index()
     )
     saar_pivot = (
-        release_long.pivot_table(index="observation_date", columns="stage", values="qoq_saar_growth_pct", aggfunc="first")
-        .rename(
-            columns={
-                "first": "qoq_saar_growth_realtime_first_pct",
-                "second": "qoq_saar_growth_realtime_second_pct",
-                "third": "qoq_saar_growth_realtime_third_pct",
-            }
-        )
+        stage_table.pivot_table(index="observation_date", columns="stage", values="qoq_saar_growth_pct", aggfunc="first")
+        .rename(columns=STAGE_QOQ_SAAR_COLS)
         .reset_index()
     )
 
     out = out.merge(qoq_pivot, on="observation_date", how="left")
     out = out.merge(saar_pivot, on="observation_date", how="left")
 
-    for col in [
-        "qoq_growth_realtime_first_pct",
-        "qoq_growth_realtime_second_pct",
-        "qoq_growth_realtime_third_pct",
-        "qoq_saar_growth_realtime_first_pct",
-        "qoq_saar_growth_realtime_second_pct",
-        "qoq_saar_growth_realtime_third_pct",
-    ]:
+    for col in [*STAGE_QOQ_COLS.values(), *STAGE_QOQ_SAAR_COLS.values()]:
         if col not in out.columns:
             out[col] = np.nan
-    return out
+
+    return out, stage_table
 
 
-def build_release_dataset(wide: pd.DataFrame, series: str, qd_panel: pd.DataFrame | None = None) -> pd.DataFrame:
+def build_release_dataset(
+    wide: pd.DataFrame,
+    series: str,
+    qd_panel: pd.DataFrame | None = None,
+    vintage_select: str = "next",
+) -> pd.DataFrame:
     vintage_cols: list[str] = []
     vintage_ts: list[pd.Timestamp] = []
 
@@ -399,14 +542,14 @@ def build_release_dataset(wide: pd.DataFrame, series: str, qd_panel: pd.DataFram
     # Realtime growth uses GDPC1 levels from the selected as-of vintage panel
     # to avoid mixing vintages around level breaks.
     if qd_panel is None:
-        out["qoq_growth_realtime_first_pct"] = np.nan
-        out["qoq_growth_realtime_second_pct"] = np.nan
-        out["qoq_growth_realtime_third_pct"] = np.nan
-        out["qoq_saar_growth_realtime_first_pct"] = np.nan
-        out["qoq_saar_growth_realtime_second_pct"] = np.nan
-        out["qoq_saar_growth_realtime_third_pct"] = np.nan
+        for col in [*STAGE_QOQ_COLS.values(), *STAGE_QOQ_SAAR_COLS.values()]:
+            out[col] = np.nan
     else:
-        out = _compute_realtime_saar_from_panel(out=out, qd_panel=qd_panel)
+        out, _ = _compute_realtime_saar_from_panel(
+            out=out,
+            qd_panel=qd_panel,
+            vintage_select=vintage_select,
+        )
 
     # Gaps make vintage-history limitations explicit (e.g., very old observations).
     out["first_release_lag_days"] = (out["first_release_date"] - out["observation_date"]).dt.days
@@ -414,6 +557,175 @@ def build_release_dataset(wide: pd.DataFrame, series: str, qd_panel: pd.DataFram
     out["third_release_lag_days"] = (out["third_release_date"] - out["observation_date"]).dt.days
 
     return out
+
+
+def validate_release_table(
+    releases_df: pd.DataFrame,
+    panel_df: pd.DataFrame,
+    vintage_select: str = "next",
+    report_path: str | Path = DEFAULT_VALIDATION_REPORT_PATH,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    stage_table = _build_realtime_stage_table(
+        releases_df=releases_df,
+        qd_panel=panel_df,
+        vintage_select=vintage_select,
+    ).copy()
+
+    stage_table["observation_date"] = pd.to_datetime(stage_table["observation_date"], errors="coerce")
+    stage_table["release_date"] = pd.to_datetime(stage_table["release_date"], errors="coerce")
+    stage_table["selected_vintage"] = pd.to_datetime(stage_table["selected_vintage"], errors="coerce")
+    quarter_period = pd.PeriodIndex(stage_table["observation_date"], freq="Q-DEC")
+    stage_table["quarter"] = quarter_period.astype(str)
+    stage_table["prev_quarter"] = (quarter_period - 1).astype(str)
+
+    stage_table = stage_table.sort_values(["stage", "quarter_ord"]).reset_index(drop=True)
+    stage_table["prev_growth_pct"] = stage_table.groupby("stage", dropna=False)["qoq_saar_growth_pct"].shift(1)
+    stage_table["growth_delta_pct"] = stage_table["qoq_saar_growth_pct"] - stage_table["prev_growth_pct"]
+
+    from_2010 = stage_table["observation_date"] >= pd.Timestamp("2010-01-01")
+    modern = stage_table["observation_date"] >= pd.Timestamp("2018-01-01")
+    is_shock_quarter = stage_table["quarter"].isin(DEFAULT_SPIKE_SHOCK_WHITELIST)
+    prev_is_shock_quarter = stage_table["prev_quarter"].isin(DEFAULT_SPIKE_SHOCK_WHITELIST)
+
+    has_stage_release = stage_table["stage_release_level"].notna() & np.isfinite(stage_table["stage_release_level"])
+    panel_ranges = (
+        panel_df[["vintage_timestamp", "quarter_ord"]]
+        .assign(
+            vintage_timestamp=lambda df_: pd.to_datetime(df_["vintage_timestamp"], errors="coerce"),
+            quarter_ord=lambda df_: pd.to_numeric(df_["quarter_ord"], errors="coerce"),
+        )
+        .dropna(subset=["vintage_timestamp", "quarter_ord"])
+        .groupby("vintage_timestamp", as_index=False)["quarter_ord"]
+        .agg(panel_min_quarter_ord="min", panel_max_quarter_ord="max")
+    )
+    stage_table = stage_table.merge(
+        panel_ranges,
+        left_on="selected_vintage",
+        right_on="vintage_timestamp",
+        how="left",
+    ).drop(columns=["vintage_timestamp"], errors="ignore")
+    within_q_span = (
+        stage_table["selected_vintage"].notna()
+        & stage_table["panel_min_quarter_ord"].notna()
+        & (stage_table["quarter_ord"] >= stage_table["panel_min_quarter_ord"])
+        & (stage_table["quarter_ord"] <= stage_table["panel_max_quarter_ord"])
+    )
+    within_prev_q_span = (
+        stage_table["selected_vintage"].notna()
+        & stage_table["panel_min_quarter_ord"].notna()
+        & (stage_table["prev_quarter_ord"] >= stage_table["panel_min_quarter_ord"])
+        & (stage_table["prev_quarter_ord"] <= stage_table["panel_max_quarter_ord"])
+    )
+    spike_abs = (
+        from_2010
+        & stage_table["qoq_saar_growth_pct"].notna()
+        & (stage_table["qoq_saar_growth_pct"].abs() > 15.0)
+        & ~is_shock_quarter
+    )
+    spike_delta = (
+        from_2010
+        & stage_table["growth_delta_pct"].notna()
+        & (stage_table["growth_delta_pct"].abs() > 12.0)
+        & ~(is_shock_quarter | prev_is_shock_quarter)
+    )
+    ratio_mismatch = (
+        modern
+        & has_stage_release
+        & stage_table["panel_to_release_ratio"].notna()
+        & (
+            (stage_table["panel_to_release_ratio"] < 0.98)
+            | (stage_table["panel_to_release_ratio"] > 1.02)
+        )
+    )
+    missing_y_q = has_stage_release & within_q_span & stage_table["panel_y_q"].isna()
+    missing_y_qm1 = has_stage_release & within_prev_q_span & stage_table["panel_y_qm1"].isna()
+
+    report_columns = [
+        "flag_type",
+        "quarter",
+        "stage",
+        "observation_date",
+        "release_date",
+        "selected_vintage",
+        "selected_vintage_label",
+        "qoq_saar_growth_pct",
+        "growth_delta_pct",
+        "panel_y_q",
+        "panel_y_qm1",
+        "stage_release_level",
+        "panel_to_release_ratio",
+    ]
+
+    flagged_frames: list[pd.DataFrame] = []
+    for mask, flag_type in [
+        (spike_abs, "spike_abs_gt_15"),
+        (spike_delta, "spike_delta_gt_12"),
+        (ratio_mismatch, "ratio_outside_0p98_1p02"),
+        (missing_y_q, "missing_panel_y_q"),
+        (missing_y_qm1, "missing_panel_y_qm1"),
+    ]:
+        if not bool(mask.any()):
+            continue
+        flagged = stage_table.loc[mask, report_columns[1:]].copy()
+        flagged.insert(0, "flag_type", flag_type)
+        flagged_frames.append(flagged)
+
+    if flagged_frames:
+        report_df = pd.concat(flagged_frames, axis=0, ignore_index=True)
+        report_df = report_df.sort_values(
+            ["flag_type", "quarter", "stage", "observation_date"],
+            na_position="last",
+        ).reset_index(drop=True)
+    else:
+        report_df = pd.DataFrame(columns=report_columns)
+
+    report_path = Path(report_path).expanduser().resolve()
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_df.to_csv(report_path, index=False)
+
+    spike_rows = stage_table.loc[
+        spike_abs | spike_delta,
+        [
+            "quarter",
+            "stage",
+            "release_date",
+            "selected_vintage",
+            "qoq_saar_growth_pct",
+        ],
+    ].copy()
+    spike_flags = int(len(spike_rows))
+    ratio_flags = int((report_df["flag_type"] == "ratio_outside_0p98_1p02").sum())
+    coverage_flags = int(report_df["flag_type"].isin({"missing_panel_y_q", "missing_panel_y_qm1"}).sum())
+
+    if spike_rows.empty:
+        print("0 flagged spikes; worst offenders: none")
+    else:
+        offenders = (
+            spike_rows.assign(abs_growth=spike_rows["qoq_saar_growth_pct"].abs())
+            .sort_values("abs_growth", ascending=False)
+            .drop_duplicates(subset=["quarter", "stage"], keep="first")
+            .head(5)
+        )
+        offender_parts = []
+        for row in offenders.itertuples(index=False):
+            g = "nan" if pd.isna(row.qoq_saar_growth_pct) else f"{row.qoq_saar_growth_pct:.2f}%"
+            rel = "NaT" if pd.isna(row.release_date) else pd.Timestamp(row.release_date).date().isoformat()
+            vint = "NaT" if pd.isna(row.selected_vintage) else pd.Timestamp(row.selected_vintage).date().isoformat()
+            offender_parts.append(f"{row.quarter}/{row.stage} (release={rel}, vintage={vint}, g={g})")
+        print(f"{spike_flags} flagged spikes; worst offenders: {'; '.join(offender_parts)}")
+
+    print(
+        "Validation flags: "
+        f"spikes={spike_flags}, ratio_mismatch={ratio_flags}, coverage={coverage_flags}"
+    )
+    print(f"Wrote validation report: {report_path}")
+
+    return report_df, {
+        "spike_flags": spike_flags,
+        "ratio_flags": ratio_flags,
+        "coverage_flags": coverage_flags,
+        "total_flags": int(len(report_df)),
+    }
 
 
 def main() -> int:
@@ -454,11 +766,37 @@ def main() -> int:
 
     wide = load_wide_vintage_csv(zip_bytes)
     print(f"Loading QD vintage panel: {args.vintage_panel_path}")
-    qd_panel = load_qd_vintage_series_panel(panel_path=args.vintage_panel_path, series=series)
-    releases = build_release_dataset(wide=wide, series=series, qd_panel=qd_panel)
+    try:
+        qd_panel = load_qd_vintage_series_panel(panel_path=args.vintage_panel_path, series=series)
+    except Exception as exc:
+        print(f"Failed to load QD vintage panel: {exc}", file=sys.stderr)
+        return 2
+
+    releases = build_release_dataset(
+        wide=wide,
+        series=series,
+        qd_panel=qd_panel,
+        vintage_select=args.vintage_select,
+    )
 
     releases.to_csv(out_csv, index=False)
     print(f"Wrote CSV: {out_csv} ({len(releases)} rows)")
+
+    validation_summary = {"spike_flags": 0}
+    if args.validate:
+        _, validation_summary = validate_release_table(
+            releases_df=releases,
+            panel_df=qd_panel,
+            vintage_select=args.vintage_select,
+            report_path=DEFAULT_VALIDATION_REPORT_PATH,
+        )
+        if args.fail_on_validate and validation_summary["spike_flags"] > 0:
+            print(
+                "Spike flags detected during validation "
+                f"({validation_summary['spike_flags']}); failing due to --fail_on_validate.",
+                file=sys.stderr,
+            )
+            return 2
 
     if args.output_parquet:
         out_parquet = Path(args.output_parquet).expanduser().resolve()
