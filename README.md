@@ -29,6 +29,7 @@ The harness is designed so models can be added modularly and compared fairly und
 ## Task Definition
 
 - Dataset source: `autogluon/fev_datasets` with config `fred_qd_2025`.
+- Vintage semantics: `fred_qd_2025` is a single finalized snapshot (`id=FRED-QD-2025-07`), not a full real-time vintage history. Historical real-time revisions are provided separately by `data/panels/fred_qd_vintage_panel.parquet` (or raw monthly vintage CSVs under `data/historical/qd/`).
 - Target construction:
   - If target exists, use it directly.
   - Otherwise compute from real GDP level (e.g., `GDPC1`):
