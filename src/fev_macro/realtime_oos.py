@@ -9,6 +9,10 @@ import numpy as np
 import pandas as pd
 from pandas.tseries.offsets import BMonthEnd
 
+from .models import MODEL_REGISTRY, build_models
+from .models.base import BaseModel
+from .realtime_feeds import RealtimeTaskShim, select_covariate_columns, train_df_to_datasets
+
 DEFAULT_MIN_FIRST_RELEASE_LAG_DAYS = 60
 DEFAULT_MAX_FIRST_RELEASE_LAG_DAYS = 200
 DEFAULT_TARGET_COL = "GDPC1"
@@ -1218,17 +1222,44 @@ BUILTIN_MODELS: dict[str, type[RealtimeModel]] = {
 }
 
 
-def resolve_models(models: Sequence[str | RealtimeModel]) -> list[RealtimeModel]:
-    resolved: list[RealtimeModel] = []
+class _RealtimeModelAdapter(BaseModel):
+    def __init__(self, realtime_model: RealtimeModel) -> None:
+        super().__init__(name=realtime_model.name)
+        self.realtime_model = realtime_model
+
+    def predict(self, past_data, future_data, task):
+        from datasets import Dataset
+
+        train_df = getattr(task, "train_df", None)
+        target_col = getattr(task, "target_col", getattr(task, "target", DEFAULT_TARGET_COL))
+        if train_df is None:
+            raise ValueError("Realtime adapter requires task.train_df.")
+        horizon = int(getattr(task, "horizon", getattr(task, "prediction_length")))
+        path = np.asarray(
+            self.realtime_model.forecast_levels(train_df=train_df, horizon=horizon, target_col=target_col),
+            dtype=float,
+        )
+        return Dataset.from_dict({"predictions": [path.tolist()]})
+
+
+def resolve_models(models: Sequence[str | RealtimeModel | BaseModel]) -> list[BaseModel]:
+    resolved: list[BaseModel] = []
     for m in models:
-        if isinstance(m, RealtimeModel):
+        if isinstance(m, BaseModel):
             resolved.append(m)
+            continue
+        if isinstance(m, RealtimeModel):
+            resolved.append(_RealtimeModelAdapter(m))
             continue
 
         key = str(m).strip().lower()
-        if key not in BUILTIN_MODELS:
-            raise ValueError(f"Unknown model '{m}'. Available: {sorted(BUILTIN_MODELS)}")
-        resolved.append(BUILTIN_MODELS[key]())
+        if key in MODEL_REGISTRY:
+            resolved.append(build_models([key], seed=0)[key])
+            continue
+        if key in BUILTIN_MODELS:
+            resolved.append(_RealtimeModelAdapter(BUILTIN_MODELS[key]()))
+            continue
+        raise ValueError(f"Unknown model '{m}'. Available: {sorted(set(BUILTIN_MODELS) | set(MODEL_REGISTRY))}")
 
     if not resolved:
         raise ValueError("No models were provided.")
@@ -1305,7 +1336,7 @@ def _build_monthly_origins(
 
 
 def run_backtest(
-    models: Sequence[str | RealtimeModel],
+    models: Sequence[str | RealtimeModel | BaseModel],
     release_table: pd.DataFrame,
     vintage_panel: pd.DataFrame,
     horizons: Iterable[int] = DEFAULT_HORIZONS,
@@ -1405,8 +1436,18 @@ def run_backtest(
             continue
         last_observed = float(train_y.loc[obs_mask].iloc[-1])
 
+        covariate_cols = select_covariate_columns(train_df=train_df, target_col=target_col)
+        past_data, future_data, task_shim = train_df_to_datasets(
+            train_df=train_df,
+            target_col=target_col,
+            horizon=max_h,
+            covariate_cols=covariate_cols,
+        )
+        task_shim.train_df = train_df
+
         for model in model_list:
-            path = np.asarray(model.forecast_levels(train_df=train_df, horizon=max_h, target_col=target_col), dtype=float)
+            pred_ds = model.predict(past_data=past_data, future_data=future_data, task=task_shim)
+            path = np.asarray(pred_ds["predictions"][0], dtype=float)
             if path.size != max_h:
                 raise ValueError(
                     f"Model '{model.name}' produced {path.size} forecasts, expected {max_h}."

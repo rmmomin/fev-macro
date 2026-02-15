@@ -113,6 +113,15 @@ def parse_args() -> argparse.Namespace:
         help="Disable historical-vintage training and use a single finalized dataset for all windows.",
     )
     parser.add_argument(
+        "--qd_vintage_panel",
+        type=str,
+        default="data/panels/fred_qd_vintage_panel.parquet",
+        help=(
+            "Fallback QD vintage panel parquet used when --historical_qd_dir CSV vintages are unavailable. "
+            "Useful after running make panel-qd."
+        ),
+    )
+    parser.add_argument(
         "--disable_fred_transforms",
         action="store_true",
         help="Disable FRED-MD/QD tcode transforms for covariates during dataset construction.",
@@ -227,6 +236,7 @@ def main() -> None:
             timestamp_mapping=timestamp_mapping,
             strict=not args.vintage_fallback_to_earliest,
             fallback_to_earliest=args.vintage_fallback_to_earliest,
+            qd_panel_path=args.qd_vintage_panel,
         )
         print(
             "Historical FRED-QD vintages enabled: "

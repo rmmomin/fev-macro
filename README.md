@@ -2,6 +2,20 @@
 
 Reproducible macro-forecasting benchmark harness built on `fev` rolling backtests, focused on US real GDP.
 
+## Quickstart
+
+```bash
+pip install -r requirements.txt
+make download-historical
+make panel-md panel-qd
+PYTHONPATH=src .venv/bin/python scripts/run_eval.py --models naive_last drift --num_windows 5 --horizons 1
+PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py --smoke_run
+PYTHONPATH=src .venv/bin/python scripts/run_latest_vintage_forecast.py --vintage latest --target_quarter 2025Q4
+PYTHONPATH=src .venv/bin/python scripts/plot_2025q4_forecast_selected_models.py --input_csv results/realtime_latest_vintage_forecast.csv
+```
+
+Benchmark mode uses a finalized dataset/task (`scripts/run_eval.py`), while realtime mode uses vintage panels and release-aware scoring (`scripts/run_realtime_oos.py`).
+
 ## Objective
 
 This repository benchmarks multiple forecasting approaches on the same task definition and backtest protocol:
