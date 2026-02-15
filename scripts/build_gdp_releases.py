@@ -4,7 +4,9 @@
 The script downloads ALFRED vintage data for a series (default: GDPC1), extracts
 first/second/third available releases per observation date, and adds q/q growth
 columns computed from the latest-available estimate for the current and previous
-quarter.
+quarter. It also computes realtime q/q SAAR growth for first/second/third
+releases using the previous-quarter level available as-of each current release
+vintage date.
 """
 
 from __future__ import annotations
@@ -151,6 +153,24 @@ def _extract_vintage_date_from_col(col: str, series: str) -> pd.Timestamp | None
     return pd.to_datetime(match.group(1), format="%Y%m%d", errors="coerce")
 
 
+def _compute_saar_growth(current_level: float, previous_level: float) -> float:
+    if not np.isfinite(current_level) or not np.isfinite(previous_level):
+        return float("nan")
+    if current_level <= 0 or previous_level <= 0:
+        return float("nan")
+    return float(100.0 * ((current_level / previous_level) ** 4 - 1.0))
+
+
+def _latest_available_asof(row: np.ndarray, upto_idx: int) -> float:
+    if upto_idx < 0:
+        return float("nan")
+    upto = row[: upto_idx + 1]
+    valid_idx = np.flatnonzero(~np.isnan(upto))
+    if valid_idx.size == 0:
+        return float("nan")
+    return float(upto[int(valid_idx[-1])])
+
+
 def build_release_dataset(wide: pd.DataFrame, series: str) -> pd.DataFrame:
     vintage_cols: list[str] = []
     vintage_ts: list[pd.Timestamp] = []
@@ -176,6 +196,9 @@ def build_release_dataset(wide: pd.DataFrame, series: str) -> pd.DataFrame:
     second_val = np.full(n, np.nan)
     third_val = np.full(n, np.nan)
     latest_val = np.full(n, np.nan)
+    first_idx = np.full(n, -1, dtype=int)
+    second_idx = np.full(n, -1, dtype=int)
+    third_idx = np.full(n, -1, dtype=int)
 
     first_date = np.full(n, np.datetime64("NaT"), dtype="datetime64[ns]")
     second_date = np.full(n, np.datetime64("NaT"), dtype="datetime64[ns]")
@@ -189,16 +212,19 @@ def build_release_dataset(wide: pd.DataFrame, series: str) -> pd.DataFrame:
             continue
 
         i1 = int(valid_idx[0])
+        first_idx[i] = i1
         first_val[i] = row[i1]
         first_date[i] = np.datetime64(vintage_ts[i1])
 
         if valid_idx.size >= 2:
             i2 = int(valid_idx[1])
+            second_idx[i] = i2
             second_val[i] = row[i2]
             second_date[i] = np.datetime64(vintage_ts[i2])
 
         if valid_idx.size >= 3:
             i3 = int(valid_idx[2])
+            third_idx[i] = i3
             third_val[i] = row[i3]
             third_date[i] = np.datetime64(vintage_ts[i3])
 
@@ -226,6 +252,31 @@ def build_release_dataset(wide: pd.DataFrame, series: str) -> pd.DataFrame:
     ratio = out["latest_release"] / out["latest_prev_release"]
     out["qoq_growth_latest_pct"] = (ratio - 1.0) * 100.0
     out["qoq_saar_growth_latest_pct"] = (ratio.pow(4) - 1.0) * 100.0
+
+    # Realtime growth: compare current-quarter release level with previous-quarter
+    # level as-of the same release vintage date.
+    qoq_saar_growth_realtime_first_pct = np.full(n, np.nan)
+    qoq_saar_growth_realtime_second_pct = np.full(n, np.nan)
+    qoq_saar_growth_realtime_third_pct = np.full(n, np.nan)
+
+    for i in range(1, n):
+        prev_row = values[i - 1, :]
+
+        if first_idx[i] >= 0:
+            prev_level_first = _latest_available_asof(prev_row, int(first_idx[i]))
+            qoq_saar_growth_realtime_first_pct[i] = _compute_saar_growth(first_val[i], prev_level_first)
+
+        if second_idx[i] >= 0:
+            prev_level_second = _latest_available_asof(prev_row, int(second_idx[i]))
+            qoq_saar_growth_realtime_second_pct[i] = _compute_saar_growth(second_val[i], prev_level_second)
+
+        if third_idx[i] >= 0:
+            prev_level_third = _latest_available_asof(prev_row, int(third_idx[i]))
+            qoq_saar_growth_realtime_third_pct[i] = _compute_saar_growth(third_val[i], prev_level_third)
+
+    out["qoq_saar_growth_realtime_first_pct"] = qoq_saar_growth_realtime_first_pct
+    out["qoq_saar_growth_realtime_second_pct"] = qoq_saar_growth_realtime_second_pct
+    out["qoq_saar_growth_realtime_third_pct"] = qoq_saar_growth_realtime_third_pct
 
     # Gaps make vintage-history limitations explicit (e.g., very old observations).
     out["first_release_lag_days"] = (out["first_release_date"] - out["observation_date"]).dt.days

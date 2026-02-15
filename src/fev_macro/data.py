@@ -20,6 +20,21 @@ DEFAULT_TARGET_SERIES_NAME = "LOG_REAL_GDP"
 DEFAULT_TARGET_TRANSFORM = "log_level"
 SUPPORTED_TARGET_TRANSFORMS = {"level", "log_level", "saar_growth"}
 FRED_QD_VINTAGE_PATTERN = re.compile(r"fred[-_]?qd_(\d{4})m(\d{1,2})\.csv$", flags=re.IGNORECASE)
+DEFAULT_GDPC1_RELEASE_CSV_CANDIDATES: tuple[Path, ...] = (
+    Path("data/gdpc1_releases_first_second_third.csv"),
+    Path("data/panels/gdpc1_releases_first_second_third.csv"),
+)
+RELEASE_STAGE_TO_COLUMN: dict[str, str] = {
+    "first": "first_release",
+    "second": "second_release",
+    "third": "third_release",
+    "latest": "latest_release",
+}
+RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN: dict[str, str] = {
+    "first": "qoq_saar_growth_realtime_first_pct",
+    "second": "qoq_saar_growth_realtime_second_pct",
+    "third": "qoq_saar_growth_realtime_third_pct",
+}
 
 
 def discover_historical_qd_vintage_files(historical_qd_dir: str | Path) -> dict[pd.Period, Path]:
@@ -538,6 +553,97 @@ def build_real_gdp_target_series(
     )
 
 
+def resolve_gdpc1_release_csv_path(path: str | Path | None = None) -> Path:
+    """Resolve gdpc1 release CSV from explicit path or default candidate locations."""
+    if path is not None and str(path).strip():
+        csv_path = Path(path).expanduser().resolve()
+        if not csv_path.exists():
+            raise FileNotFoundError(f"Release CSV does not exist: {csv_path}")
+        return csv_path
+
+    for candidate in DEFAULT_GDPC1_RELEASE_CSV_CANDIDATES:
+        resolved = candidate.expanduser().resolve()
+        if resolved.exists():
+            return resolved
+
+    candidates = ", ".join(str(p) for p in DEFAULT_GDPC1_RELEASE_CSV_CANDIDATES)
+    raise FileNotFoundError(
+        "Could not locate gdpc1 release CSV. Checked default paths: "
+        f"{candidates}"
+    )
+
+
+def apply_gdpc1_release_truth_target(
+    dataset_df: pd.DataFrame,
+    release_csv_path: str | Path | None = None,
+    release_stage: str = "first",
+    release_metric: str = "level",
+    target_transform: str = DEFAULT_TARGET_TRANSFORM,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Replace dataset target values with selected GDP release-stage truth by quarter."""
+    _validate_target_transform(target_transform)
+    stage = _normalize_release_stage(release_stage)
+    metric_kind = _normalize_release_metric(release_metric)
+
+    if metric_kind == "realtime_qoq_saar":
+        if stage not in RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN:
+            raise ValueError(
+                "Realtime SAAR release metric supports stages first/second/third only; "
+                f"got stage={stage!r}."
+            )
+        stage_col = RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN[stage]
+    else:
+        stage_col = RELEASE_STAGE_TO_COLUMN[stage]
+
+    csv_path = resolve_gdpc1_release_csv_path(path=release_csv_path)
+    releases = pd.read_csv(csv_path)
+
+    required = {"observation_date", stage_col}
+    missing = sorted(required.difference(releases.columns))
+    if missing:
+        raise ValueError(f"Release CSV missing required columns: {missing}")
+
+    rel = releases.copy()
+    rel["observation_date"] = pd.to_datetime(rel["observation_date"], errors="coerce")
+    rel[stage_col] = pd.to_numeric(rel[stage_col], errors="coerce")
+    rel = rel.loc[rel["observation_date"].notna() & rel[stage_col].notna()].copy()
+    if rel.empty:
+        raise ValueError(
+            f"Release CSV has no valid rows for stage '{stage}' ({stage_col}): {csv_path}"
+        )
+
+    rel["quarter"] = pd.PeriodIndex(rel["observation_date"], freq="Q-DEC")
+    rel = rel.sort_values("observation_date").drop_duplicates(subset=["quarter"], keep="last")
+    release_levels_by_quarter = rel.set_index("quarter")[stage_col].astype(float)
+
+    out = dataset_df.copy()
+    out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
+    out = out.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    out["quarter"] = pd.PeriodIndex(out["timestamp"], freq="Q-DEC")
+
+    mapped_values = pd.to_numeric(out["quarter"].map(release_levels_by_quarter), errors="coerce")
+    if metric_kind == "realtime_qoq_saar":
+        # Values are already q/q SAAR percent and can be used directly as the target.
+        out["target"] = mapped_values.astype(float)
+    else:
+        out["target"] = _transform_from_level(level_series=mapped_values, target_transform=target_transform).astype(float)
+
+    covariate_columns = [c for c in out.columns if c not in {"item_id", "timestamp", "target", "quarter"}]
+    rows_with_release_target = int(np.isfinite(out["target"].to_numpy(dtype=float)).sum())
+    out = out.drop(columns=["quarter"])
+    out = _drop_invalid_and_fill_covariates(out=out, covariate_columns=covariate_columns)
+
+    return out, {
+        "source": "gdpc1_release_csv",
+        "release_metric": metric_kind,
+        "release_stage": stage,
+        "release_column": stage_col,
+        "release_csv_path": str(csv_path),
+        "release_quarters_available": int(len(release_levels_by_quarter)),
+        "rows_with_release_target": rows_with_release_target,
+    }
+
+
 def build_gdp_saar_growth_series(
     dataset: Dataset,
     target_series_name: str = "GDP_SAAR",
@@ -960,6 +1066,39 @@ def _pick_source_series(available_ids: set[str], preferred: Sequence[str]) -> st
                 return series_id
 
     return None
+
+
+def _normalize_release_stage(stage: str) -> str:
+    stage_norm = str(stage).strip().lower()
+    aliases = {
+        "first_release": "first",
+        "second_release": "second",
+        "third_release": "third",
+        "latest_release": "latest",
+    }
+    stage_norm = aliases.get(stage_norm, stage_norm)
+    if stage_norm not in RELEASE_STAGE_TO_COLUMN:
+        raise ValueError(
+            f"Unsupported release_stage={stage!r}. "
+            f"Supported={sorted(RELEASE_STAGE_TO_COLUMN)}"
+        )
+    return stage_norm
+
+
+def _normalize_release_metric(metric: str) -> str:
+    metric_norm = str(metric).strip().lower()
+    aliases = {
+        "realtime_saar": "realtime_qoq_saar",
+        "realtime_qoq_saar_pct": "realtime_qoq_saar",
+    }
+    metric_norm = aliases.get(metric_norm, metric_norm)
+    allowed = {"level", "realtime_qoq_saar"}
+    if metric_norm not in allowed:
+        raise ValueError(
+            f"Unsupported release_metric={metric!r}. "
+            f"Supported={sorted(allowed)}"
+        )
+    return metric_norm
 
 
 def _compute_saar_growth(level_series: pd.Series) -> pd.Series:

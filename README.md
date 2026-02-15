@@ -14,22 +14,26 @@ PYTHONPATH=src .venv/bin/python scripts/run_latest_vintage_forecast.py --vintage
 PYTHONPATH=src .venv/bin/python scripts/plot_2025q4_forecast_selected_models.py --input_csv results/realtime_latest_vintage_forecast.csv
 ```
 
-Benchmark mode uses a finalized dataset/task (`scripts/run_eval.py`), while realtime mode uses vintage panels and release-aware scoring (`scripts/run_realtime_oos.py`).
+Benchmark mode (`scripts/run_eval.py`) defaults to release-table GDP truth, while realtime mode uses vintage panels and release-aware scoring (`scripts/run_realtime_oos.py`).
 
 ## Objective
 
 This repository benchmarks multiple forecasting approaches on the same task definition and backtest protocol:
 
-- Core benchmark target: `LOG_REAL_GDP` (log real GDP level).
+- Core benchmark target: realtime GDP q/q SAAR growth from release-table truth.
 - Evaluation: multi-horizon rolling windows (`h = 1, 2, 3, 4`) with comparable metrics and leaderboard tables.
-- Visualization: convert log-level forecasts to q/q SAAR growth for train/OOS plotting.
+- Visualization: inspect predicted q/q SAAR growth paths directly.
 
 The harness is designed so models can be added modularly and compared fairly under identical windows, metrics, and data handling.
 
 ## Task Definition
 
-- Dataset source: `autogluon/fev_datasets` with config `fred_qd_2025`.
-- Vintage semantics: `fred_qd_2025` is a single finalized snapshot (`id=FRED-QD-2025-07`), not a full real-time vintage history. Historical real-time revisions are provided separately by `data/panels/fred_qd_vintage_panel.parquet` (or raw monthly vintage CSVs under `data/historical/qd/`).
+- Base covariate dataset source: `autogluon/fev_datasets` with config `fred_qd_2025`.
+- Evaluation truth source (default): `data/panels/gdpc1_releases_first_second_third.csv` using realtime SAAR columns:
+  - `qoq_saar_growth_realtime_first_pct`
+  - `qoq_saar_growth_realtime_second_pct`
+  - `qoq_saar_growth_realtime_third_pct`
+- Vintage semantics: `fred_qd_2025` is a single finalized snapshot (`id=FRED-QD-2025-07`) used for covariates/task scaffolding, not a full real-time vintage history. Historical real-time revisions are provided separately by `data/panels/fred_qd_vintage_panel.parquet` (or raw monthly vintage CSVs under `data/historical/qd/`).
 - Target construction:
   - If target exists, use it directly.
   - Otherwise compute from real GDP level (e.g., `GDPC1`):
@@ -99,13 +103,19 @@ Notes:
 
 The harness enforces a vintage-aware protocol:
 
-1. Build the canonical evaluation dataset from `fred_qd_2025` (target + covariates), excluding 2020.
-2. For each rolling window, identify the training cutoff date.
-3. Select the latest historical FRED-QD vintage file with vintage month `<=` that cutoff.
-4. Replace `past_data` (training history) with data from that selected vintage.
-5. Keep `future_data` and OOS ground truth from `fred_qd_2025`.
+1. Build the canonical task frame from `fred_qd_2025` (target scaffold + covariates).
+2. Replace task target values with release-table realtime q/q SAAR truth from `gdpc1_releases_first_second_third.csv`.
+3. By default, build three evaluation slices (`first`, `second`, `third`) from:
+   - `qoq_saar_growth_realtime_first_pct`
+   - `qoq_saar_growth_realtime_second_pct`
+   - `qoq_saar_growth_realtime_third_pct`
+4. Exclude configured years (default: 2020).
+5. For each rolling window, identify the training cutoff date.
+6. Select the latest historical FRED-QD vintage file with vintage month `<=` that cutoff.
+7. Replace `past_data` (training history) with data from that selected vintage.
+8. Keep `future_data` and OOS ground truth from the release-truth-overlaid task dataset.
 
-This ensures models train only on information available at that historical point, while test scoring uses the finalized benchmark target path.
+This ensures models train only on information available at that historical point, while scoring uses explicit GDP release truth rather than finalized revised GDP.
 
 ## FRED Transform Codes (FredMDQD.jl Port)
 
@@ -310,9 +320,14 @@ Default benchmark CLI settings:
 - `--horizons 1 2 3 4`
 - `--num_windows 100`
 - `--metric RMSE`
+- `--target_transform saar_growth`
+- `--eval_truth_source release_csv`
+- `--eval_release_metric realtime_qoq_saar`
+- `--eval_release_csv data/panels/gdpc1_releases_first_second_third.csv`
+- `--eval_release_stages first second third`
 - `--models` full 18-model default list (see section above)
 
-### Latest default benchmark snapshot (February 15, 2026)
+### Prior benchmark snapshot (February 15, 2026)
 
 Command run:
 
@@ -323,6 +338,8 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src .venv/bin/python scripts/run_
 Observed run details:
 
 - Target: `LOG_REAL_GDP` (`log_level`), excluding year `2020`.
+- Evaluation truth: `data/panels/gdpc1_releases_first_second_third.csv` (`first_release` stage).
+- Note: this snapshot predates the default switch to realtime SAAR truth (`first/second/third` columns) and is not directly comparable to current defaults.
 - Built task dataset: `results/log_real_gdp_dataset.parquet`.
 - Training vintage source: historical FRED-QD CSV vintages at `data/historical/qd/vintages_2018_2026` (93 monthly files from `2018-05` to `2026-01`).
 - Strict coverage reduced effective windows from requested `100` to:
