@@ -4,10 +4,15 @@ from collections.abc import Callable
 
 from .base import BaseModel
 from .baselines import Drift, Mean, NaiveLast, SeasonalNaive
+from .bvar_minnesota import BVARMinnesota20Model, BVARMinnesota8Model
 from .chronos2 import Chronos2Model
+from .ensemble import EnsembleAvgTop3Model, EnsembleWeightedTop5Model
+from .factor_models import MixedFrequencyDFMModel, QuarterlyFactorPCAModel
 from .random_forest import RandomForestModel
 from .randoms import RandomNormal, RandomPermutation, RandomUniform
+from .state_space import LocalTrendStateSpaceModel
 from .statsforecast_models import AutoARIMAModel, AutoETSModel, ThetaModel
+from .xgboost_model import XGBoostModel
 
 ModelBuilder = Callable[[int], BaseModel]
 
@@ -29,10 +34,18 @@ MODEL_REGISTRY: dict[str, ModelBuilder] = {
     "random_uniform": lambda seed: RandomUniform(seed=seed),
     "random_permutation": lambda seed: RandomPermutation(seed=seed),
     "random_forest": lambda seed: RandomForestModel(seed=seed),
+    "xgboost": lambda seed: XGBoostModel(seed=seed),
+    "local_trend_ssm": _no_seed(LocalTrendStateSpaceModel),
+    "bvar_minnesota_8": _no_seed(BVARMinnesota8Model),
+    "bvar_minnesota_20": _no_seed(BVARMinnesota20Model),
+    "factor_pca_qd": lambda seed: QuarterlyFactorPCAModel(seed=seed),
+    "mixed_freq_dfm_md": lambda seed: MixedFrequencyDFMModel(seed=seed),
+    "ensemble_avg_top3": _no_seed(EnsembleAvgTop3Model),
+    "ensemble_weighted_top5": _no_seed(EnsembleWeightedTop5Model),
     "auto_arima": _no_seed(lambda: AutoARIMAModel(season_length=4)),
     "auto_ets": _no_seed(lambda: AutoETSModel(season_length=4)),
     "theta": _no_seed(lambda: ThetaModel(season_length=4)),
-    "chronos2": _no_seed(Chronos2Model),
+    "chronos2": _no_seed(lambda: Chronos2Model(device_map="cpu")),
 }
 
 

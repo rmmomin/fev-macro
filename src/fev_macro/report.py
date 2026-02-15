@@ -251,6 +251,21 @@ def _fallback_pairwise(
             }
         )
 
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "model_a",
+                "model_b",
+                "n_tasks",
+                "win_rate_a_over_b",
+                "win_rate_ci_lo",
+                "win_rate_ci_hi",
+                "mean_metric_diff_b_minus_a",
+                "mean_metric_diff_ci_lo",
+                "mean_metric_diff_ci_hi",
+            ]
+        )
+
     pairwise = pd.DataFrame(rows).sort_values(["model_a", "win_rate_a_over_b"], ascending=[True, False])
     return pairwise.reset_index(drop=True)
 
@@ -302,7 +317,9 @@ def _bootstrap_skill_ci(
     if model_values.size == 0 or baseline_values.size == 0:
         return np.nan, np.nan
 
-    n = model_values.size
+    n = min(model_values.size, baseline_values.size)
+    model_values = model_values[:n]
+    baseline_values = baseline_values[:n]
     stats = np.empty(bootstrap_samples, dtype=float)
 
     for i in range(bootstrap_samples):

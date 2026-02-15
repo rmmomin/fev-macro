@@ -14,7 +14,11 @@ if str(SRC) not in sys.path:
 
 from fev_macro.data import (  # noqa: E402
     DEFAULT_SOURCE_SERIES_CANDIDATES,
-    build_gdp_saar_growth_series,
+    DEFAULT_TARGET_SERIES_NAME,
+    DEFAULT_TARGET_TRANSFORM,
+    SUPPORTED_TARGET_TRANSFORMS,
+    build_real_gdp_target_series,
+    exclude_years,
     find_gdp_column_candidates,
     load_fev_dataset,
 )
@@ -25,11 +29,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset_path", type=str, default="autogluon/fev_datasets")
     parser.add_argument("--dataset_config", type=str, default="fred_qd_2025")
     parser.add_argument("--dataset_revision", type=str, default=None)
-    parser.add_argument("--target", type=str, default="GDP_SAAR")
+    parser.add_argument("--target", type=str, default=DEFAULT_TARGET_SERIES_NAME)
+    parser.add_argument(
+        "--target_transform",
+        type=str,
+        default=DEFAULT_TARGET_TRANSFORM,
+        choices=sorted(SUPPORTED_TARGET_TRANSFORMS),
+    )
     parser.add_argument(
         "--source_series_candidates",
         nargs="+",
         default=list(DEFAULT_SOURCE_SERIES_CANDIDATES),
+    )
+    parser.add_argument(
+        "--exclude_years",
+        type=int,
+        nargs="*",
+        default=[2020],
+        help="Calendar years excluded from inspected target series.",
     )
     return parser.parse_args()
 
@@ -67,12 +84,18 @@ def main() -> None:
     )
 
     candidates = find_gdp_column_candidates(dataset)
-    gdp_df, meta = build_gdp_saar_growth_series(
+    gdp_df, meta = build_real_gdp_target_series(
         dataset=dataset,
         target_series_name=args.target,
+        target_transform=args.target_transform,
         source_series_candidates=args.source_series_candidates,
         include_covariates=True,
     )
+    years_to_exclude = sorted({int(y) for y in (args.exclude_years or [])})
+    before_n = len(gdp_df)
+    if years_to_exclude:
+        gdp_df = exclude_years(gdp_df, years=years_to_exclude)
+    after_n = len(gdp_df)
 
     ts = pd.to_datetime(gdp_df["timestamp"], errors="coerce").dropna().sort_values()
     start = ts.min()
@@ -84,10 +107,12 @@ def main() -> None:
     print(f"Candidate GDP IDs: {candidates['id_candidates']}")
     print(f"Candidate GDP columns: {candidates['column_candidates']}")
     print(f"Target selected: {meta['target_series']} (computed={meta['computed']}, source={meta['source_series']})")
+    print(f"Target transform: {meta.get('target_transform', args.target_transform)}")
     covs = meta.get("covariate_columns", [])
     print(f"Covariates discovered: {len(covs)}")
     if covs:
         print(f"Covariate sample: {covs[:20]}")
+    print(f"Excluded years: {years_to_exclude} (rows {before_n} -> {after_n})")
     print(f"Date range: {start} -> {end}")
     print(f"Frequency: {freq}")
     print("First rows:")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -12,7 +12,15 @@ from datasets import Dataset
 from .models.base import BaseModel, get_task_horizon, get_task_id_column, get_task_timestamp_column
 
 
-def run_models_on_task(task: Any, models: dict[str, BaseModel], num_windows: int = 80) -> list[dict[str, Any]]:
+PastDataAdapter = Callable[[Dataset, Dataset, Any, int], Dataset]
+
+
+def run_models_on_task(
+    task: Any,
+    models: dict[str, BaseModel],
+    num_windows: int = 80,
+    past_data_adapter: PastDataAdapter | None = None,
+) -> list[dict[str, Any]]:
     """Run each model on one task and return fev evaluation summaries."""
     _ = num_windows
     summaries: list[dict[str, Any]] = []
@@ -28,6 +36,9 @@ def run_models_on_task(task: Any, models: dict[str, BaseModel], num_windows: int
             else:
                 past_data = input_data
                 future_data = window.get_future_data()
+
+            if past_data_adapter is not None:
+                past_data = past_data_adapter(past_data, future_data, task, window_idx)
 
             start = time.perf_counter()
             raw_predictions = model.predict(past_data=past_data, future_data=future_data, task=task)
@@ -64,11 +75,17 @@ def run_models_on_tasks(
     tasks: list[Any],
     models: dict[str, BaseModel],
     num_windows: int = 80,
+    past_data_adapter: PastDataAdapter | None = None,
 ) -> list[dict[str, Any]]:
     all_summaries: list[dict[str, Any]] = []
 
     for task in tasks:
-        task_summaries = run_models_on_task(task=task, models=models, num_windows=num_windows)
+        task_summaries = run_models_on_task(
+            task=task,
+            models=models,
+            num_windows=num_windows,
+            past_data_adapter=past_data_adapter,
+        )
         all_summaries.extend(task_summaries)
 
     return all_summaries

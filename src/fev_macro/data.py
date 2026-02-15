@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -14,6 +15,326 @@ DEFAULT_SOURCE_SERIES_CANDIDATES: tuple[str, ...] = (
     "REAL_GDP",
     "GDP",
 )
+DEFAULT_TARGET_SERIES_NAME = "LOG_REAL_GDP"
+DEFAULT_TARGET_TRANSFORM = "log_level"
+SUPPORTED_TARGET_TRANSFORMS = {"level", "log_level", "saar_growth"}
+FRED_QD_VINTAGE_PATTERN = re.compile(r"fred[-_]?qd_(\d{4})m(\d{1,2})\.csv$", flags=re.IGNORECASE)
+
+
+def discover_historical_qd_vintage_files(historical_qd_dir: str | Path) -> dict[pd.Period, Path]:
+    """Discover historical FRED-QD vintage files keyed by monthly vintage period."""
+    preferred = Path(historical_qd_dir).expanduser()
+    root = preferred.resolve() if preferred.exists() else None
+    if root is None:
+        root = _autodiscover_historical_qd_dir(preferred)
+    if root is None:
+        raise FileNotFoundError(f"Historical FRED-QD directory does not exist: {preferred.resolve()}")
+
+    if not root.exists():
+        raise FileNotFoundError(f"Historical FRED-QD directory does not exist: {root}")
+
+    files: dict[pd.Period, Path] = {}
+    for path in sorted(root.rglob("*.csv")):
+        period = _parse_fred_qd_vintage_period(path.name)
+        if period is None:
+            continue
+        files[period] = path
+
+    if not files:
+        raise FileNotFoundError(f"No FRED-QD vintage CSVs found under: {root}")
+
+    return dict(sorted(files.items(), key=lambda kv: kv[0]))
+
+
+def load_historical_fred_qd_vintage_dataframe(csv_path: str | Path) -> pd.DataFrame:
+    """Load one historical FRED-QD vintage CSV and return numeric quarterly rows."""
+    csv_path = Path(csv_path)
+    raw = pd.read_csv(csv_path)
+    if raw.empty:
+        raise ValueError(f"Historical vintage CSV has no rows: {csv_path}")
+
+    date_col = str(raw.columns[0])
+    date_values = pd.to_datetime(raw[date_col], format="%m/%d/%Y", errors="coerce")
+    data = raw.loc[date_values.notna()].copy()
+    if data.empty:
+        raise ValueError(f"No data rows found in historical vintage CSV: {csv_path}")
+
+    data["timestamp"] = pd.to_datetime(data[date_col], format="%m/%d/%Y", errors="coerce")
+    data = data.drop(columns=[date_col]).sort_values("timestamp").reset_index(drop=True)
+
+    for col in data.columns:
+        if col == "timestamp":
+            continue
+        data[col] = pd.to_numeric(data[col], errors="coerce")
+
+    return data
+
+
+def build_real_gdp_target_series_from_time_rows(
+    wide_df: pd.DataFrame,
+    target_series_name: str = DEFAULT_TARGET_SERIES_NAME,
+    target_transform: str = DEFAULT_TARGET_TRANSFORM,
+    source_series_candidates: Sequence[str] | None = None,
+    include_covariates: bool = False,
+    covariate_allowlist: Sequence[str] | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Build real-GDP target series from row-wise time dataframe with `timestamp` column."""
+    _validate_target_transform(target_transform)
+    source_series_candidates = tuple(source_series_candidates or DEFAULT_SOURCE_SERIES_CANDIDATES)
+
+    if "timestamp" not in wide_df.columns:
+        raise ValueError("wide_df must include a 'timestamp' column")
+
+    data = wide_df.copy()
+    data["timestamp"] = pd.to_datetime(data["timestamp"], errors="coerce")
+    data = data.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    if data.empty:
+        raise ValueError("No valid timestamped rows found in wide_df")
+
+    available_ids = set(map(str, [c for c in data.columns if c != "timestamp"]))
+    computed = False
+    source_series = target_series_name
+
+    if target_series_name in data.columns:
+        target = pd.to_numeric(data[target_series_name], errors="coerce")
+    else:
+        source_series = _pick_source_series(available_ids=available_ids, preferred=source_series_candidates)
+        if source_series is None:
+            raise ValueError(
+                "Could not find real GDP level series in historical dataframe. "
+                f"Checked candidates={list(source_series_candidates)}"
+            )
+        source = pd.to_numeric(data[source_series], errors="coerce")
+        target = _transform_from_level(level_series=source, target_transform=target_transform)
+        computed = target_transform != "level"
+
+    out = pd.DataFrame(
+        {
+            "item_id": target_series_name,
+            "timestamp": data["timestamp"],
+            "target": pd.to_numeric(target, errors="coerce").to_numpy(dtype=float),
+        }
+    )
+
+    covariate_columns: list[str] = []
+    if include_covariates:
+        excluded = {"timestamp", target_series_name, source_series}
+        allowlist = set(covariate_allowlist or [])
+        selected_covariates: list[str] = []
+        for cov in data.columns:
+            if cov in excluded:
+                continue
+            if covariate_allowlist is not None and cov not in allowlist:
+                continue
+            selected_covariates.append(cov)
+
+        if selected_covariates:
+            cov_frame = data[selected_covariates].apply(pd.to_numeric, errors="coerce")
+            out = pd.concat([out, cov_frame.reset_index(drop=True)], axis=1)
+            covariate_columns.extend(selected_covariates)
+
+    out = _drop_invalid_and_fill_covariates(out=out, covariate_columns=covariate_columns)
+    return out, {
+        "computed": computed,
+        "source_series": source_series,
+        "target_series": target_series_name,
+        "target_transform": target_transform,
+        "covariate_columns": covariate_columns,
+    }
+
+
+class HistoricalQuarterlyVintageProvider:
+    """Window-aware provider that swaps training history to historical FRED-QD vintages."""
+
+    def __init__(
+        self,
+        historical_qd_dir: str | Path,
+        target_series_name: str = DEFAULT_TARGET_SERIES_NAME,
+        target_transform: str = DEFAULT_TARGET_TRANSFORM,
+        source_series_candidates: Sequence[str] | None = None,
+        covariate_columns: Sequence[str] | None = None,
+        include_covariates: bool = True,
+        exclude_years_list: Sequence[int] | None = None,
+        timestamp_mapping: dict[pd.Timestamp, pd.Timestamp] | None = None,
+        strict: bool = True,
+        fallback_to_earliest: bool = False,
+    ) -> None:
+        self.target_series_name = target_series_name
+        self.target_transform = target_transform
+        self.source_series_candidates = tuple(source_series_candidates or DEFAULT_SOURCE_SERIES_CANDIDATES)
+        self.include_covariates = bool(include_covariates)
+        self.covariate_columns = list(covariate_columns or [])
+        self.exclude_years_list = sorted({int(y) for y in (exclude_years_list or [])})
+        self.timestamp_mapping = {
+            pd.Timestamp(k): pd.Timestamp(v) for k, v in (timestamp_mapping or {}).items()
+        }
+        self.strict = bool(strict)
+        self.fallback_to_earliest = bool(fallback_to_earliest)
+
+        self.vintage_files = discover_historical_qd_vintage_files(historical_qd_dir=historical_qd_dir)
+        self.historical_qd_dir = next(iter(self.vintage_files.values())).parent.resolve()
+        self.vintage_periods = sorted(self.vintage_files.keys())
+        self._cache: dict[pd.Period, pd.DataFrame] = {}
+        self._selection_cache: dict[pd.Period, pd.Period | None] = {}
+
+    @property
+    def earliest_vintage(self) -> pd.Period:
+        return self.vintage_periods[0]
+
+    @property
+    def latest_vintage(self) -> pd.Period:
+        return self.vintage_periods[-1]
+
+    def available_range_str(self) -> str:
+        return f"{self.earliest_vintage}..{self.latest_vintage}"
+
+    def select_vintage_period(self, cutoff_timestamp: pd.Timestamp, allow_fallback: bool | None = None) -> pd.Period | None:
+        """Pick latest monthly vintage period <= cutoff month."""
+        cutoff_period = pd.Period(pd.Timestamp(cutoff_timestamp), freq="M")
+        if cutoff_period in self._selection_cache:
+            cached = self._selection_cache[cutoff_period]
+            if cached is not None:
+                return cached
+
+        allow_fallback = self.fallback_to_earliest if allow_fallback is None else bool(allow_fallback)
+        eligible = [p for p in self.vintage_periods if p <= cutoff_period]
+        if eligible:
+            selected = eligible[-1]
+            self._selection_cache[cutoff_period] = selected
+            return selected
+
+        if allow_fallback and self.vintage_periods:
+            selected = self.vintage_periods[0]
+            self._selection_cache[cutoff_period] = selected
+            return selected
+
+        self._selection_cache[cutoff_period] = None
+        return None
+
+    def compatible_window_count(self, task: Any) -> int:
+        """Count latest windows that can be trained with a valid historical vintage."""
+        validity: list[bool] = []
+        for window in task.iter_windows():
+            input_data = window.get_input_data()
+            if isinstance(input_data, tuple) and len(input_data) == 2:
+                past_data, _ = input_data
+            else:
+                past_data = input_data
+
+            cutoff = _extract_past_cutoff_timestamp(past_data=past_data, task=task)
+            cutoff_actual = self.timestamp_mapping.get(pd.Timestamp(cutoff), pd.Timestamp(cutoff))
+            is_valid = self.select_vintage_period(cutoff_actual, allow_fallback=False) is not None
+            validity.append(is_valid)
+
+        if not validity:
+            return 0
+        if not self.strict:
+            return len(validity)
+
+        first_valid_idx: int | None = None
+        for idx, is_valid in enumerate(validity):
+            if is_valid:
+                first_valid_idx = idx
+                break
+
+        if first_valid_idx is None:
+            return 0
+
+        suffix = validity[first_valid_idx:]
+        if all(suffix):
+            return len(suffix)
+
+        # Defensive fallback: count only the trailing fully valid suffix.
+        trailing = 0
+        for is_valid in reversed(validity):
+            if is_valid:
+                trailing += 1
+            else:
+                break
+        return trailing
+
+    def adapt_past_data(self, past_data: Dataset, task: Any) -> Dataset:
+        """Return a past_data Dataset reconstructed from the matching historical vintage."""
+        id_col = _task_id_column(task)
+        ts_col = _task_timestamp_column(task)
+        target_col = _task_target_column(task)
+        required_covars = _task_covariate_columns(task)
+
+        rows: list[dict[str, Any]] = []
+        for rec in past_data:
+            ts_reindexed = pd.to_datetime(pd.Series(rec.get(ts_col, [])), errors="coerce")
+            ts_reindexed = ts_reindexed.dropna().reset_index(drop=True)
+            if ts_reindexed.empty:
+                continue
+
+            actual_ts = ts_reindexed.map(lambda t: self.timestamp_mapping.get(pd.Timestamp(t), pd.Timestamp(t)))
+            actual_ts = pd.to_datetime(actual_ts, errors="coerce").reset_index(drop=True)
+            if actual_ts.isna().all():
+                continue
+            actual_ts = actual_ts.where(actual_ts.notna(), ts_reindexed)
+
+            cutoff = pd.Timestamp(actual_ts.iloc[-1])
+            selected = self.select_vintage_period(cutoff_timestamp=cutoff, allow_fallback=not self.strict)
+            if selected is None:
+                raise ValueError(
+                    "No historical FRED-QD vintage available for cutoff "
+                    f"{cutoff.date()} (earliest vintage is {self.earliest_vintage})."
+                )
+
+            vintage_df = self._load_vintage_frame(vintage_period=selected)
+            vintage_hist = vintage_df.loc[vintage_df["timestamp"] <= cutoff].copy()
+            vintage_hist = vintage_hist.sort_values("timestamp").reset_index(drop=True)
+            vintage_indexed = vintage_hist.set_index("timestamp", drop=True)
+
+            aligned_target = pd.to_numeric(vintage_indexed.reindex(actual_ts)["target"], errors="coerce")
+            fallback_target = _series_like_to_numeric(rec.get(target_col), expected_len=len(ts_reindexed))
+            target_values = np.where(aligned_target.notna(), aligned_target, fallback_target).astype(float)
+
+            row: dict[str, Any] = {
+                id_col: rec.get(id_col, "__single_series__"),
+                ts_col: ts_reindexed.tolist(),
+                target_col: target_values.tolist(),
+            }
+
+            for cov in required_covars:
+                fallback_cov = _series_like_to_numeric(rec.get(cov), expected_len=len(ts_reindexed))
+                if cov in vintage_indexed.columns:
+                    from_vintage = pd.to_numeric(vintage_indexed.reindex(actual_ts)[cov], errors="coerce")
+                    cov_values = np.where(from_vintage.notna(), from_vintage, fallback_cov)
+                else:
+                    cov_values = fallback_cov.to_numpy(dtype=float)
+
+                cov_series = pd.Series(cov_values, dtype=float).ffill().bfill().fillna(0.0)
+                row[cov] = cov_series.to_numpy(dtype=float).tolist()
+
+            rows.append(row)
+
+        if not rows:
+            raise ValueError("HistoricalQuarterlyVintageProvider produced an empty past_data dataset")
+
+        return Dataset.from_list(rows)
+
+    def _load_vintage_frame(self, vintage_period: pd.Period) -> pd.DataFrame:
+        if vintage_period in self._cache:
+            return self._cache[vintage_period]
+
+        csv_path = self.vintage_files[vintage_period]
+        wide = load_historical_fred_qd_vintage_dataframe(csv_path=csv_path)
+        target_df, _ = build_real_gdp_target_series_from_time_rows(
+            wide_df=wide,
+            target_series_name=self.target_series_name,
+            target_transform=self.target_transform,
+            source_series_candidates=self.source_series_candidates,
+            include_covariates=self.include_covariates,
+            covariate_allowlist=self.covariate_columns or None,
+        )
+
+        if self.exclude_years_list:
+            target_df = exclude_years(target_df, years=self.exclude_years_list)
+
+        target_df = target_df.sort_values("timestamp").reset_index(drop=True)
+        self._cache[vintage_period] = target_df
+        return target_df
 
 
 def load_fev_dataset(
@@ -66,24 +387,28 @@ def find_gdp_column_candidates(dataset: Dataset, id_col: str = "id") -> dict[str
     }
 
 
-def build_gdp_saar_growth_series(
+def build_real_gdp_target_series(
     dataset: Dataset,
-    target_series_name: str = "GDP_SAAR",
+    target_series_name: str = DEFAULT_TARGET_SERIES_NAME,
+    target_transform: str = DEFAULT_TARGET_TRANSFORM,
     source_series_candidates: Sequence[str] | None = None,
     id_col: str = "item_id",
     timestamp_col: str = "timestamp",
     target_col: str = "target",
     include_covariates: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    """Build GDP q/q SAAR series and optional aligned covariates in long format.
+    """Build real-GDP target series and optional aligned covariates in long format.
 
     If target_series_name exists, it is used directly.
-    Otherwise, target is computed from a level series y_t as
-        g_t = 100 * ((y_t / y_{t-1})**4 - 1)
+    Otherwise, target is computed from real GDP level series y_t using:
+      - level: y_t
+      - log_level: log(y_t)
+      - saar_growth: 100 * ((y_t / y_{t-1})**4 - 1)
 
     Returned dataframe has columns:
         item_id, timestamp, target, [covariates...]
     """
+    _validate_target_transform(target_transform)
     source_series_candidates = tuple(source_series_candidates or DEFAULT_SOURCE_SERIES_CANDIDATES)
     pdf = dataset.to_pandas()
 
@@ -91,6 +416,7 @@ def build_gdp_saar_growth_series(
         return _build_from_long_format(
             pdf=pdf,
             target_series_name=target_series_name,
+            target_transform=target_transform,
             source_series_candidates=source_series_candidates,
             id_col=id_col,
             timestamp_col=timestamp_col,
@@ -101,8 +427,31 @@ def build_gdp_saar_growth_series(
     return _build_from_wide_format(
         pdf=pdf,
         target_series_name=target_series_name,
+        target_transform=target_transform,
         source_series_candidates=source_series_candidates,
         timestamp_col=timestamp_col,
+        include_covariates=include_covariates,
+    )
+
+
+def build_gdp_saar_growth_series(
+    dataset: Dataset,
+    target_series_name: str = "GDP_SAAR",
+    source_series_candidates: Sequence[str] | None = None,
+    id_col: str = "item_id",
+    timestamp_col: str = "timestamp",
+    target_col: str = "target",
+    include_covariates: bool = False,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """Backward-compatible wrapper for GDP q/q SAAR target construction."""
+    return build_real_gdp_target_series(
+        dataset=dataset,
+        target_series_name=target_series_name,
+        target_transform="saar_growth",
+        source_series_candidates=source_series_candidates,
+        id_col=id_col,
+        timestamp_col=timestamp_col,
+        target_col=target_col,
         include_covariates=include_covariates,
     )
 
@@ -137,15 +486,209 @@ def export_local_dataset_parquet(dataset_df: pd.DataFrame, output_path: str | Pa
     return output_path
 
 
+def exclude_years(dataset_df: pd.DataFrame, years: Sequence[int] | None = None) -> pd.DataFrame:
+    """Exclude observations whose timestamp year is in `years`.
+
+    Supports both long format (timestamp scalar) and sequence format (timestamp list).
+    """
+    years = sorted({int(y) for y in (years or [])})
+    if not years:
+        return dataset_df.copy()
+
+    out = dataset_df.copy()
+
+    if _is_sequence_dataset(out):
+        rows: list[dict[str, Any]] = []
+        for _, rec in out.iterrows():
+            ts = pd.to_datetime(pd.Series(rec["timestamp"]), errors="coerce")
+            y = pd.to_numeric(pd.Series(rec["target"]), errors="coerce")
+            keep = ts.notna() & ~ts.dt.year.isin(years)
+
+            row: dict[str, Any] = {
+                "item_id": rec["item_id"],
+                "timestamp": ts[keep].tolist(),
+                "target": y[keep].astype(float).tolist(),
+            }
+
+            for col in [c for c in out.columns if c not in {"item_id", "timestamp", "target"}]:
+                cov = _series_like_to_numeric(rec[col], expected_len=len(ts))
+                row[col] = cov[keep].astype(float).tolist()
+
+            if row["timestamp"]:
+                rows.append(row)
+
+        return pd.DataFrame(rows)
+
+    out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
+    keep = out["timestamp"].notna() & ~out["timestamp"].dt.year.isin(years)
+    out = out.loc[keep].sort_values(["item_id", "timestamp"]).reset_index(drop=True)
+    return out
+
+
+def reindex_to_regular_frequency(
+    dataset_df: pd.DataFrame,
+    freq: str = "QS-DEC",
+    timestamp_col: str = "timestamp",
+    id_col: str = "item_id",
+) -> pd.DataFrame:
+    """Reassign timestamps to a regular frequency while preserving within-series order."""
+    out = dataset_df.copy()
+    out[timestamp_col] = pd.to_datetime(out[timestamp_col], errors="coerce")
+    out = out.dropna(subset=[timestamp_col])
+
+    if _is_sequence_dataset(out):
+        rows: list[dict[str, Any]] = []
+        for _, rec in out.iterrows():
+            ts = pd.to_datetime(pd.Series(rec[timestamp_col]), errors="coerce")
+            ts = ts.dropna().reset_index(drop=True)
+            if ts.empty:
+                continue
+            new_ts = pd.date_range(start=ts.iloc[0], periods=len(ts), freq=freq)
+
+            row: dict[str, Any] = {
+                id_col: rec[id_col],
+                timestamp_col: list(new_ts.to_pydatetime()),
+                "target": rec["target"],
+            }
+            for col in [c for c in out.columns if c not in {id_col, timestamp_col, "target"}]:
+                row[col] = rec[col]
+            rows.append(row)
+        return pd.DataFrame(rows)
+
+    if id_col not in out.columns:
+        out = out.sort_values(timestamp_col).reset_index(drop=True)
+        out[timestamp_col] = pd.date_range(start=out[timestamp_col].iloc[0], periods=len(out), freq=freq)
+        return out
+
+    groups: list[pd.DataFrame] = []
+    for _, grp in out.groupby(id_col, sort=False):
+        g = grp.sort_values(timestamp_col).reset_index(drop=True).copy()
+        g[timestamp_col] = pd.date_range(start=g[timestamp_col].iloc[0], periods=len(g), freq=freq)
+        groups.append(g)
+
+    return pd.concat(groups, axis=0, ignore_index=True)
+
+
+def build_reindexed_to_actual_timestamp_map(
+    actual_df: pd.DataFrame,
+    reindexed_df: pd.DataFrame,
+    id_col: str = "item_id",
+    timestamp_col: str = "timestamp",
+) -> dict[pd.Timestamp, pd.Timestamp]:
+    """Map reindexed timestamps back to original timestamps by within-series step."""
+    actual = actual_df[[id_col, timestamp_col]].copy()
+    reindexed = reindexed_df[[id_col, timestamp_col]].copy()
+
+    actual[timestamp_col] = pd.to_datetime(actual[timestamp_col], errors="coerce")
+    reindexed[timestamp_col] = pd.to_datetime(reindexed[timestamp_col], errors="coerce")
+
+    actual = actual.dropna(subset=[timestamp_col]).sort_values([id_col, timestamp_col]).reset_index(drop=True)
+    reindexed = reindexed.dropna(subset=[timestamp_col]).sort_values([id_col, timestamp_col]).reset_index(drop=True)
+
+    actual["step"] = actual.groupby(id_col, sort=False).cumcount()
+    reindexed["step"] = reindexed.groupby(id_col, sort=False).cumcount()
+
+    merged = reindexed.merge(
+        actual[[id_col, "step", timestamp_col]].rename(columns={timestamp_col: "actual_timestamp"}),
+        on=[id_col, "step"],
+        how="left",
+    )
+
+    mapping: dict[pd.Timestamp, pd.Timestamp] = {}
+    for _, row in merged.iterrows():
+        reindexed_ts = pd.Timestamp(row[timestamp_col])
+        actual_ts = pd.Timestamp(row["actual_timestamp"]) if pd.notna(row["actual_timestamp"]) else reindexed_ts
+        mapping[reindexed_ts] = actual_ts
+    return mapping
+
+
+def _task_id_column(task: Any) -> str:
+    return getattr(task, "id_column", getattr(task, "id_col", "id"))
+
+
+def _task_timestamp_column(task: Any) -> str:
+    return getattr(task, "timestamp_column", getattr(task, "timestamp_col", "timestamp"))
+
+
+def _task_target_column(task: Any) -> str:
+    target = getattr(task, "target", getattr(task, "target_col", "target"))
+    if isinstance(target, list):
+        if not target:
+            raise ValueError("Task target list is empty")
+        return str(target[0])
+    return str(target)
+
+
+def _task_covariate_columns(task: Any) -> list[str]:
+    known = list(getattr(task, "known_dynamic_columns", []) or [])
+    past = list(getattr(task, "past_dynamic_columns", []) or [])
+    return list(dict.fromkeys([str(c) for c in [*past, *known]]))
+
+
+def _extract_past_cutoff_timestamp(past_data: Dataset, task: Any) -> pd.Timestamp:
+    ts_col = _task_timestamp_column(task)
+    if len(past_data) == 0:
+        raise ValueError("past_data is empty; cannot extract cutoff timestamp")
+
+    rec = past_data[0]
+    ts = pd.to_datetime(pd.Series(rec.get(ts_col, [])), errors="coerce")
+    ts = ts.dropna()
+    if ts.empty:
+        raise ValueError("past_data has no valid timestamps")
+
+    return pd.Timestamp(ts.iloc[-1])
+
+
+def _autodiscover_historical_qd_dir(preferred: Path) -> Path | None:
+    search_roots: list[Path] = []
+    if preferred.parent.exists():
+        search_roots.append(preferred.parent.resolve())
+
+    default_root = Path("data/historical").expanduser().resolve()
+    if default_root.exists() and default_root not in search_roots:
+        search_roots.append(default_root)
+
+    for root in search_roots:
+        files = sorted(root.rglob("FRED-QD_*.csv"))
+        if not files:
+            files = sorted(root.rglob("fred-qd_*.csv"))
+        if not files:
+            continue
+
+        parent_counts: dict[Path, int] = {}
+        for path in files:
+            parent = path.parent.resolve()
+            parent_counts[parent] = parent_counts.get(parent, 0) + 1
+
+        if parent_counts:
+            return max(parent_counts.items(), key=lambda kv: kv[1])[0]
+
+    return None
+
+
+def _parse_fred_qd_vintage_period(filename: str) -> pd.Period | None:
+    match = FRED_QD_VINTAGE_PATTERN.search(filename)
+    if not match:
+        return None
+
+    year = int(match.group(1))
+    month = int(match.group(2))
+    if month < 1 or month > 12:
+        return None
+
+    return pd.Period(f"{year:04d}-{month:02d}", freq="M")
+
+
 def _looks_like_gdp(name: str) -> bool:
     upper = name.upper()
-    tokens = ("GDP", "GDPC1", "RGDP", "REALGDP", "REAL_GDP", "GDP_SAAR")
+    tokens = ("GDP", "GDPC1", "RGDP", "REALGDP", "REAL_GDP", "GDP_SAAR", "LOG_REAL_GDP")
     return any(token in upper for token in tokens)
 
 
 def _build_from_long_format(
     pdf: pd.DataFrame,
     target_series_name: str,
+    target_transform: str,
     source_series_candidates: Sequence[str],
     id_col: str,
     timestamp_col: str,
@@ -181,8 +724,9 @@ def _build_from_long_format(
                 f"Checked candidates={list(source_series_candidates)}; "
                 f"available GDP-like IDs={sorted([s for s in available_ids if _looks_like_gdp(s)])}"
             )
-        target = _compute_saar_growth(pd.to_numeric(pivot[source_series], errors="coerce"))
-        computed = True
+        source = pd.to_numeric(pivot[source_series], errors="coerce")
+        target = _transform_from_level(level_series=source, target_transform=target_transform)
+        computed = target_transform != "level"
 
     out = pd.DataFrame(
         {
@@ -206,6 +750,7 @@ def _build_from_long_format(
         "computed": computed,
         "source_series": source_series,
         "target_series": target_series_name,
+        "target_transform": target_transform,
         "covariate_columns": covariate_columns,
     }
 
@@ -213,6 +758,7 @@ def _build_from_long_format(
 def _build_from_wide_format(
     pdf: pd.DataFrame,
     target_series_name: str,
+    target_transform: str,
     source_series_candidates: Sequence[str],
     timestamp_col: str,
     include_covariates: bool,
@@ -235,8 +781,8 @@ def _build_from_wide_format(
                 f"Checked candidates={list(source_series_candidates)}"
             )
         source = _extract_numeric_vector(row=row, column=source_series)
-        target = _compute_saar_growth(source)
-        computed = True
+        target = _transform_from_level(level_series=source, target_transform=target_transform)
+        computed = target_transform != "level"
 
     out = pd.DataFrame({"item_id": target_series_name, "timestamp": timestamps, "target": target})
 
@@ -258,6 +804,7 @@ def _build_from_wide_format(
         "computed": computed,
         "source_series": source_series,
         "target_series": target_series_name,
+        "target_transform": target_transform,
         "covariate_columns": covariate_columns,
     }
 
@@ -281,6 +828,30 @@ def _pick_source_series(available_ids: set[str], preferred: Sequence[str]) -> st
 
 def _compute_saar_growth(level_series: pd.Series) -> pd.Series:
     return 100.0 * ((level_series / level_series.shift(1)) ** 4 - 1.0)
+
+
+def _compute_log_level(level_series: pd.Series) -> pd.Series:
+    level = pd.to_numeric(level_series, errors="coerce")
+    positive = level.where(level > 0, np.nan)
+    return np.log(positive)
+
+
+def _transform_from_level(level_series: pd.Series, target_transform: str) -> pd.Series:
+    if target_transform == "level":
+        return pd.to_numeric(level_series, errors="coerce")
+    if target_transform == "log_level":
+        return _compute_log_level(level_series)
+    if target_transform == "saar_growth":
+        return _compute_saar_growth(pd.to_numeric(level_series, errors="coerce"))
+    raise ValueError(f"Unsupported target_transform={target_transform}")
+
+
+def _validate_target_transform(target_transform: str) -> None:
+    if target_transform not in SUPPORTED_TARGET_TRANSFORMS:
+        raise ValueError(
+            f"Unsupported target_transform={target_transform}. "
+            f"Supported={sorted(SUPPORTED_TARGET_TRANSFORMS)}"
+        )
 
 
 def _extract_timestamp_vector(row: pd.Series, timestamp_col: str) -> pd.Series:

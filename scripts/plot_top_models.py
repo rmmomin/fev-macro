@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,9 +17,16 @@ if str(SRC) not in sys.path:
 
 from fev_macro.data import (  # noqa: E402
     DEFAULT_SOURCE_SERIES_CANDIDATES,
-    build_gdp_saar_growth_series,
+    DEFAULT_TARGET_SERIES_NAME,
+    DEFAULT_TARGET_TRANSFORM,
+    HistoricalQuarterlyVintageProvider,
+    SUPPORTED_TARGET_TRANSFORMS,
+    build_reindexed_to_actual_timestamp_map,
+    build_real_gdp_target_series,
+    exclude_years,
     export_local_dataset_parquet,
     load_fev_dataset,
+    reindex_to_regular_frequency,
 )
 from fev_macro.models import build_models  # noqa: E402
 from fev_macro.models.base import get_task_horizon, get_task_target_column, get_task_timestamp_column  # noqa: E402
@@ -27,35 +35,74 @@ from fev_macro.tasks import make_gdp_tasks  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Plot train history and OOS forecasts for top-K leaderboard models on GDP SAAR growth."
+        description=(
+            "Plot train/OOS real GDP q/q SAAR growth from log-real-GDP forecasts "
+            "for top-K models in the leaderboard."
+        )
     )
     parser.add_argument("--results_dir", type=str, default="results")
     parser.add_argument("--leaderboard", type=str, default="results/leaderboard.csv")
     parser.add_argument("--dataset_path", type=str, default="autogluon/fev_datasets")
     parser.add_argument("--dataset_config", type=str, default="fred_qd_2025")
     parser.add_argument("--dataset_revision", type=str, default=None)
-    parser.add_argument("--target", type=str, default="GDP_SAAR")
+    parser.add_argument("--target", type=str, default=DEFAULT_TARGET_SERIES_NAME)
+    parser.add_argument(
+        "--target_transform",
+        type=str,
+        default=DEFAULT_TARGET_TRANSFORM,
+        choices=sorted(SUPPORTED_TARGET_TRANSFORMS),
+        help="Forecast target transform used by the benchmark (must be log_level or level for this plot).",
+    )
     parser.add_argument("--horizon", type=int, default=1)
     parser.add_argument("--num_windows", type=int, default=80)
     parser.add_argument("--metric", type=str, default="RMSE")
     parser.add_argument("--top_k", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
+        "--exclude_years",
+        type=int,
+        nargs="*",
+        default=[2020],
+        help="Calendar years excluded from model training/evaluation windows.",
+    )
+    parser.add_argument(
+        "--task_prefix",
+        type=str,
+        default="log_real_gdp",
+        help="Task prefix used in benchmark task names.",
+    )
+    parser.add_argument(
         "--output",
         type=str,
-        default="results/gdp_saar_oos_top5.png",
+        default="results/log_real_gdp_growth_oos_top5.png",
         help="Output plot path",
     )
     parser.add_argument(
         "--predictions_csv",
         type=str,
-        default="results/gdp_saar_oos_top5.csv",
+        default="results/log_real_gdp_growth_oos_top5.csv",
         help="Output OOS predictions csv path",
     )
     parser.add_argument(
         "--source_series_candidates",
         nargs="+",
         default=list(DEFAULT_SOURCE_SERIES_CANDIDATES),
+    )
+    parser.add_argument(
+        "--historical_qd_dir",
+        type=str,
+        default="data/historical/Historical vintages of FRED-QD 2018-05 to 2024-12",
+        help="Path to historical FRED-QD vintage CSVs for vintage-correct training windows.",
+    )
+    parser.add_argument(
+        "--disable_historical_vintages",
+        action="store_true",
+        help="Disable historical-vintage training and use finalized data for all windows.",
+    )
+    parser.add_argument(
+        "--vintage_fallback_to_earliest",
+        action="store_true",
+        help="Allow pre-vintage windows to use earliest available vintage instead of strict coverage.",
     )
     return parser.parse_args()
 
@@ -68,9 +115,12 @@ def load_top_models(leaderboard_path: Path, top_k: int) -> list[str]:
     if "model_name" not in leaderboard.columns:
         raise ValueError(f"Leaderboard must include model_name column. Found columns={list(leaderboard.columns)}")
 
-    sort_cols = [c for c in ["win_rate", "skill_score"] if c in leaderboard.columns]
-    if sort_cols:
-        leaderboard = leaderboard.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+    if "win_rate" in leaderboard.columns and "test_error" in leaderboard.columns:
+        leaderboard = leaderboard.sort_values(["win_rate", "test_error"], ascending=[False, True])
+    elif "win_rate" in leaderboard.columns:
+        leaderboard = leaderboard.sort_values(["win_rate"], ascending=[False])
+    elif "test_error" in leaderboard.columns:
+        leaderboard = leaderboard.sort_values(["test_error"], ascending=[True])
 
     top_models = leaderboard["model_name"].head(top_k).tolist()
     if not top_models:
@@ -78,22 +128,29 @@ def load_top_models(leaderboard_path: Path, top_k: int) -> list[str]:
     return top_models
 
 
-def collect_oos_predictions(task, model_names: list[str], seed: int) -> pd.DataFrame:
+def collect_oos_predictions(
+    task,
+    model_names: list[str],
+    seed: int,
+    past_data_adapter: Callable | None = None,
+) -> pd.DataFrame:
     models = build_models(model_names=model_names, seed=seed)
     horizon = get_task_horizon(task)
     ts_col = get_task_timestamp_column(task)
     target_col = get_task_target_column(task)
 
-    # timestamp -> {actuals: [...], model_name: [preds]}
     data: dict[pd.Timestamp, dict[str, list[float]]] = {}
 
-    for window in task.iter_windows():
+    for window_idx, window in enumerate(task.iter_windows()):
         input_data = window.get_input_data()
         if isinstance(input_data, tuple) and len(input_data) == 2:
             past_data, future_data = input_data
         else:
             past_data = input_data
             future_data = window.get_future_data()
+
+        if past_data_adapter is not None:
+            past_data = past_data_adapter(past_data, future_data, task, window_idx)
 
         truth = window.get_ground_truth()
         ts_values = pd.to_datetime(pd.Series(truth[0][ts_col]), errors="coerce")
@@ -131,9 +188,68 @@ def collect_oos_predictions(task, model_names: list[str], seed: int) -> pd.DataF
     return pd.DataFrame(rows)
 
 
+def _to_log_series(values: pd.Series, target_transform: str) -> pd.Series:
+    series = pd.to_numeric(values, errors="coerce")
+    if target_transform == "log_level":
+        return series
+    if target_transform == "level":
+        return np.log(series.where(series > 0, np.nan))
+    raise ValueError(
+        "Plot conversion to q/q SAAR from log GDP requires target_transform in {'log_level', 'level'}. "
+        f"Got: {target_transform}"
+    )
+
+
+def _log_diff_to_saar(log_diff: pd.Series) -> pd.Series:
+    diff = pd.to_numeric(log_diff, errors="coerce")
+    return 100.0 * (np.exp(4.0 * diff) - 1.0)
+
+
+def make_growth_view(
+    filtered_target_df: pd.DataFrame,
+    full_reference_df: pd.DataFrame,
+    oos_raw_df: pd.DataFrame,
+    model_names: list[str],
+    target_transform: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    full = filtered_target_df[["timestamp", "target"]].copy()
+    full["timestamp"] = pd.to_datetime(full["timestamp"], errors="coerce")
+    full = full.dropna(subset=["timestamp", "target"]).sort_values("timestamp").reset_index(drop=True)
+
+    ref = full_reference_df[["timestamp", "target"]].copy()
+    ref["timestamp"] = pd.to_datetime(ref["timestamp"], errors="coerce")
+    ref = ref.dropna(subset=["timestamp", "target"]).sort_values("timestamp").reset_index(drop=True)
+    ref["actual_log"] = _to_log_series(ref["target"], target_transform=target_transform)
+    ref["prev_log"] = ref["actual_log"].shift(1)
+
+    full["actual_log"] = _to_log_series(full["target"], target_transform=target_transform)
+    prev_lookup = ref[["timestamp", "prev_log"]].copy()
+    full = full.merge(prev_lookup, on="timestamp", how="left")
+    full["actual_growth_saar"] = _log_diff_to_saar(full["actual_log"] - full["prev_log"])
+
+    oos = oos_raw_df.copy()
+    oos["timestamp"] = pd.to_datetime(oos["timestamp"], errors="coerce")
+    oos = oos.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+    oos = oos.merge(prev_lookup, on="timestamp", how="left")
+    oos["actual_log"] = _to_log_series(oos["actual"], target_transform=target_transform)
+    oos["actual_growth_saar"] = _log_diff_to_saar(oos["actual_log"] - oos["prev_log"])
+
+    for model_name in model_names:
+        if model_name not in oos.columns:
+            continue
+        oos[f"{model_name}_log"] = _to_log_series(oos[model_name], target_transform=target_transform)
+        oos[f"{model_name}_growth_saar"] = _log_diff_to_saar(oos[f"{model_name}_log"] - oos["prev_log"])
+
+    first_test_ts = pd.to_datetime(oos["timestamp"]).min()
+    history = full.loc[full["timestamp"] < first_test_ts, ["timestamp", "actual_growth_saar"]].dropna().copy()
+
+    return history, oos
+
+
 def make_plot(
     history_df: pd.DataFrame,
-    oos_df: pd.DataFrame,
+    oos_growth_df: pd.DataFrame,
     model_names: list[str],
     output_path: Path,
     horizon: int,
@@ -141,20 +257,20 @@ def make_plot(
 ) -> None:
     fig, ax = plt.subplots(figsize=(14, 7))
 
-    first_test_ts = pd.to_datetime(oos_df["timestamp"]).min()
+    first_test_ts = pd.to_datetime(oos_growth_df["timestamp"]).min()
 
     ax.plot(
         history_df["timestamp"],
-        history_df["target"],
+        history_df["actual_growth_saar"],
         color="black",
         linewidth=2.2,
         label="Actual (train)",
     )
 
-    test_actual = oos_df[["timestamp", "actual"]].dropna().sort_values("timestamp")
+    test_actual = oos_growth_df[["timestamp", "actual_growth_saar"]].dropna().sort_values("timestamp")
     ax.plot(
         test_actual["timestamp"],
-        test_actual["actual"],
+        test_actual["actual_growth_saar"],
         color="black",
         linestyle="--",
         linewidth=2.0,
@@ -162,11 +278,12 @@ def make_plot(
     )
 
     for model_name in model_names:
-        if model_name not in oos_df.columns:
+        col = f"{model_name}_growth_saar"
+        if col not in oos_growth_df.columns:
             continue
         ax.plot(
-            oos_df["timestamp"],
-            oos_df[model_name],
+            oos_growth_df["timestamp"],
+            oos_growth_df[col],
             linewidth=1.8,
             alpha=0.9,
             label=f"{model_name} (OOS)",
@@ -175,7 +292,10 @@ def make_plot(
     ax.axvline(first_test_ts, color="gray", linestyle=":", linewidth=1.6, label="Test start")
 
     ax.set_title(
-        f"US Real GDP Growth (q/q SAAR): Train History + OOS Forecasts (Top {len(model_names)} Models, h={horizon}, windows={num_windows})"
+        (
+            "US Real GDP Growth (q/q SAAR from log real GDP): "
+            f"Train History + OOS Forecasts (Top {len(model_names)} Models, h={horizon}, windows={num_windows})"
+        )
     )
     ax.set_xlabel("Date")
     ax.set_ylabel("Growth (percent, SAAR)")
@@ -204,16 +324,49 @@ def main() -> None:
         dataset_revision=args.dataset_revision,
     )
 
-    gdp_df, gdp_meta = build_gdp_saar_growth_series(
+    gdp_full_df, gdp_meta = build_real_gdp_target_series(
         dataset=dataset,
         target_series_name=args.target,
+        target_transform=args.target_transform,
         source_series_candidates=args.source_series_candidates,
         include_covariates=True,
+    )
+    years_to_exclude = sorted({int(y) for y in (args.exclude_years or [])})
+    gdp_df = exclude_years(gdp_full_df, years=years_to_exclude)
+    gdp_filtered_actual = gdp_df.copy()
+    freq = pd.infer_freq(pd.to_datetime(gdp_full_df["timestamp"], errors="coerce").dropna().sort_values()) or "QS-DEC"
+    gdp_task_df = reindex_to_regular_frequency(gdp_df, freq=freq)
+    timestamp_mapping = build_reindexed_to_actual_timestamp_map(
+        actual_df=gdp_filtered_actual,
+        reindexed_df=gdp_task_df,
+        id_col="item_id",
+        timestamp_col="timestamp",
     )
     covariate_columns = list(gdp_meta.get("covariate_columns", []))
 
     local_dataset_path = results_dir / f"{args.target.lower()}_dataset.parquet"
-    export_local_dataset_parquet(gdp_df, output_path=local_dataset_path)
+    export_local_dataset_parquet(gdp_task_df, output_path=local_dataset_path)
+
+    vintage_provider: HistoricalQuarterlyVintageProvider | None = None
+    past_data_adapter = None
+    if not args.disable_historical_vintages:
+        vintage_provider = HistoricalQuarterlyVintageProvider(
+            historical_qd_dir=args.historical_qd_dir,
+            target_series_name=args.target,
+            target_transform=args.target_transform,
+            source_series_candidates=args.source_series_candidates,
+            covariate_columns=covariate_columns,
+            include_covariates=True,
+            exclude_years_list=years_to_exclude,
+            timestamp_mapping=timestamp_mapping,
+            strict=not args.vintage_fallback_to_earliest,
+            fallback_to_earliest=args.vintage_fallback_to_earliest,
+        )
+        print(
+            "Historical FRED-QD vintages enabled for plotting: "
+            f"{vintage_provider.available_range_str()} ({len(vintage_provider.vintage_periods)} files) "
+            f"from {vintage_provider.historical_qd_dir}"
+        )
 
     task = make_gdp_tasks(
         dataset_path=str(local_dataset_path),
@@ -225,35 +378,82 @@ def main() -> None:
         timestamp_col="timestamp",
         target_col="target",
         known_dynamic_columns=covariate_columns,
+        task_prefix=args.task_prefix,
     )[0]
 
-    oos_df = collect_oos_predictions(task=task, model_names=top_models, seed=args.seed)
-    if oos_df.empty:
+    if vintage_provider is not None:
+        if not args.vintage_fallback_to_earliest:
+            compatible_windows = vintage_provider.compatible_window_count(task)
+            if compatible_windows <= 0:
+                raise ValueError(
+                    "No compatible windows for historical-vintage plotting at "
+                    f"horizon {args.horizon}. Reduce --num_windows or enable --vintage_fallback_to_earliest."
+                )
+            if compatible_windows < int(args.num_windows):
+                print(
+                    f"Reducing plotting windows from {args.num_windows} to {compatible_windows} "
+                    "to enforce strict historical-vintage coverage."
+                )
+                task = make_gdp_tasks(
+                    dataset_path=str(local_dataset_path),
+                    dataset_config=None,
+                    horizons=[args.horizon],
+                    num_windows=int(compatible_windows),
+                    metric=args.metric,
+                    id_col="id",
+                    timestamp_col="timestamp",
+                    target_col="target",
+                    known_dynamic_columns=covariate_columns,
+                    task_prefix=args.task_prefix,
+                )[0]
+
+        def past_data_adapter(past_data, future_data, task, window_idx):  # type: ignore[no-redef]
+            _ = future_data
+            _ = window_idx
+            return vintage_provider.adapt_past_data(past_data=past_data, task=task)
+
+    effective_num_windows = int(getattr(task, "num_windows", args.num_windows))
+
+    oos_raw_df = collect_oos_predictions(
+        task=task,
+        model_names=top_models,
+        seed=args.seed,
+        past_data_adapter=past_data_adapter,
+    )
+    if oos_raw_df.empty:
         raise ValueError("No OOS predictions were generated")
+    ts_map = timestamp_mapping
+    oos_raw_df["timestamp"] = pd.to_datetime(oos_raw_df["timestamp"], errors="coerce").map(ts_map)
+    oos_raw_df = oos_raw_df.dropna(subset=["timestamp"]).reset_index(drop=True)
 
-    oos_df = oos_df.sort_values("timestamp").reset_index(drop=True)
-    first_test_ts = pd.to_datetime(oos_df["timestamp"]).min()
-
-    full_actual = gdp_df[["timestamp", "target"]].copy()
-    full_actual["timestamp"] = pd.to_datetime(full_actual["timestamp"], errors="coerce")
-    full_actual = full_actual.dropna(subset=["timestamp", "target"]).sort_values("timestamp")
-
-    history_df = full_actual.loc[full_actual["timestamp"] < first_test_ts].copy()
+    history_df, oos_growth_df = make_growth_view(
+        filtered_target_df=gdp_df,
+        full_reference_df=gdp_full_df,
+        oos_raw_df=oos_raw_df,
+        model_names=top_models,
+        target_transform=args.target_transform,
+    )
 
     predictions_csv.parent.mkdir(parents=True, exist_ok=True)
-    oos_df.to_csv(predictions_csv, index=False)
+    oos_growth_df.to_csv(predictions_csv, index=False)
 
     make_plot(
         history_df=history_df,
-        oos_df=oos_df,
+        oos_growth_df=oos_growth_df,
         model_names=top_models,
         output_path=output_path,
         horizon=args.horizon,
-        num_windows=args.num_windows,
+        num_windows=effective_num_windows,
     )
 
     print(f"Top models: {top_models}")
-    print(f"Target used: {gdp_meta['target_series']} (computed={gdp_meta['computed']}, source={gdp_meta['source_series']})")
+    print(
+        "Target used: "
+        f"{gdp_meta['target_series']} "
+        f"(transform={gdp_meta.get('target_transform', args.target_transform)}, "
+        f"computed={gdp_meta['computed']}, source={gdp_meta['source_series']})"
+    )
+    print(f"Excluded years: {years_to_exclude}")
     print(f"Covariates used: {len(covariate_columns)}")
     print(f"Saved OOS predictions: {predictions_csv}")
     print(f"Saved plot: {output_path}")

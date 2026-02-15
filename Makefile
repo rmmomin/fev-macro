@@ -3,7 +3,7 @@ VENV ?= .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
 
-.PHONY: setup inspect-data run report plot
+.PHONY: setup inspect-data run report plot download-historical
 
 setup:
 	$(PYTHON) -m venv $(VENV)
@@ -21,3 +21,6 @@ report:
 
 plot:
 	$(PY) scripts/plot_top_models.py
+
+download-historical:
+	$(PY) scripts/download_historical_vintages.py
