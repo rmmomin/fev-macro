@@ -3,7 +3,7 @@ VENV ?= .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
 
-.PHONY: setup inspect-data run report plot download-historical panel-md panel-qd panels
+.PHONY: setup inspect-data run report plot download-historical panel-md panel-qd panels latest-forecast
 
 setup:
 	$(PYTHON) -m venv $(VENV)
@@ -32,3 +32,6 @@ panel-qd:
 	$(PY) scripts/build_qd_vintage_panel.py
 
 panels: panel-md panel-qd
+
+latest-forecast:
+	$(PY) scripts/run_latest_vintage_forecast.py

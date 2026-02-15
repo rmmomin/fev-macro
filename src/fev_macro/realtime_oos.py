@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, Any
 
 import numpy as np
 import pandas as pd
@@ -12,11 +13,38 @@ DEFAULT_MIN_FIRST_RELEASE_LAG_DAYS = 60
 DEFAULT_MAX_FIRST_RELEASE_LAG_DAYS = 200
 DEFAULT_TARGET_COL = "GDPC1"
 DEFAULT_HORIZONS = (1, 2, 3, 4)
+DEFAULT_MD_PANEL_PATH = Path("data/panels/fred_md_vintage_panel.parquet")
 RELEASE_STAGE_TO_COL = {
     "first": "first_release",
     "second": "second_release",
     "third": "third_release",
 }
+
+PREFERRED_MD_COVARIATES: tuple[str, ...] = (
+    "UNRATE",
+    "PAYEMS",
+    "INDPRO",
+    "IPFINAL",
+    "RETAILx",
+    "CMRMTSPLx",
+    "RPI",
+    "W875RX1",
+    "M2REAL",
+    "FEDFUNDS",
+    "TB3MS",
+    "GS10",
+    "CP3Mx",
+    "CPIAUCSL",
+    "PCEPI",
+    "OILPRICEx",
+    "S&P 500",
+    "UMCSENTx",
+    "HOUST",
+    "PERMIT",
+)
+
+_MD_VINTAGE_CACHE: dict[tuple[str, str, int], pd.DataFrame] = {}
+_MD_PANEL_CACHE: dict[str, pd.DataFrame] = {}
 
 
 def to_quarter_period(values: pd.Series | Sequence[object]) -> pd.PeriodIndex:
@@ -278,14 +306,362 @@ class RealtimeModel(ABC):
         raise NotImplementedError
 
 
+def _target_array(train_df: pd.DataFrame, target_col: str) -> np.ndarray:
+    y = pd.to_numeric(train_df[target_col], errors="coerce").dropna().to_numpy(dtype=float)
+    if y.size == 0:
+        raise ValueError("No target history available.")
+    return y
+
+
+def _recursive_log_level_regression(
+    y: np.ndarray,
+    horizon: int,
+    regressor_builder,
+    lags: int = 4,
+) -> np.ndarray:
+    if y.size == 0:
+        raise ValueError("No target history available.")
+    if np.any(y <= 0):
+        raise ValueError("Model requires strictly positive levels.")
+    if y.size <= lags + 1:
+        return np.repeat(y[-1], horizon)
+
+    ly = np.log(y)
+    x_rows: list[np.ndarray] = []
+    y_rows: list[float] = []
+    for t in range(lags, ly.size):
+        x_rows.append(ly[t - lags : t].copy())
+        y_rows.append(float(ly[t]))
+
+    x = np.asarray(x_rows, dtype=float)
+    y_target = np.asarray(y_rows, dtype=float)
+
+    model = regressor_builder()
+    model.fit(x, y_target)
+
+    hist = list(ly.astype(float))
+    preds_ly: list[float] = []
+    for _ in range(horizon):
+        feats = np.asarray(hist[-lags:], dtype=float).reshape(1, -1)
+        pred = float(model.predict(feats)[0])
+        preds_ly.append(pred)
+        hist.append(pred)
+
+    return np.exp(np.asarray(preds_ly, dtype=float))
+
+
+def _load_md_vintage_quarterly_features(
+    vintage_id: str,
+    md_panel_path: Path = DEFAULT_MD_PANEL_PATH,
+    max_covariates: int = 24,
+) -> pd.DataFrame:
+    key = (str(md_panel_path), str(vintage_id), int(max_covariates))
+    if key in _MD_VINTAGE_CACHE:
+        return _MD_VINTAGE_CACHE[key]
+
+    panel_path = Path(md_panel_path)
+    if not panel_path.exists():
+        out = pd.DataFrame()
+        _MD_VINTAGE_CACHE[key] = out
+        return out
+
+    cache_key = str(panel_path)
+    if cache_key in _MD_PANEL_CACHE:
+        panel = _MD_PANEL_CACHE[cache_key]
+    else:
+        panel = pd.read_parquet(panel_path)
+        panel["vintage"] = panel["vintage"].astype(str)
+        panel["timestamp"] = pd.to_datetime(panel["timestamp"], errors="coerce")
+        panel = panel.dropna(subset=["timestamp"]).sort_values(["vintage", "timestamp"]).reset_index(drop=True)
+        _MD_PANEL_CACHE[cache_key] = panel
+
+    d = panel.loc[panel["vintage"].astype(str) == str(vintage_id)].copy()
+    if d.empty:
+        out = pd.DataFrame()
+        _MD_VINTAGE_CACHE[key] = out
+        return out
+
+    numeric_cols = [
+        c
+        for c in d.columns
+        if c not in {"vintage", "timestamp", "vintage_timestamp"} and pd.api.types.is_numeric_dtype(d[c])
+    ]
+    selected: list[str] = []
+    for col in PREFERRED_MD_COVARIATES:
+        if col in numeric_cols and col not in selected:
+            selected.append(col)
+        if len(selected) >= max_covariates:
+            break
+    if len(selected) < max_covariates:
+        for col in numeric_cols:
+            if col in selected:
+                continue
+            s = pd.to_numeric(d[col], errors="coerce")
+            if s.notna().sum() < 24:
+                continue
+            selected.append(col)
+            if len(selected) >= max_covariates:
+                break
+
+    if not selected:
+        out = pd.DataFrame()
+        _MD_VINTAGE_CACHE[key] = out
+        return out
+
+    for col in selected:
+        d[col] = pd.to_numeric(d[col], errors="coerce")
+    d["quarter"] = d["timestamp"].dt.to_period("Q-DEC")
+    q = d.groupby("quarter", sort=True)[selected].last().ffill().bfill()
+    q.columns = [f"md_{c}" for c in q.columns]
+    out = q
+    _MD_VINTAGE_CACHE[key] = out
+    return out
+
+
+def _augment_with_md_features(
+    train_df: pd.DataFrame,
+    md_panel_path: Path = DEFAULT_MD_PANEL_PATH,
+    max_md_covariates: int = 24,
+) -> pd.DataFrame:
+    out = train_df.copy()
+    vintage_id = str(out.get("__origin_vintage", pd.Series([np.nan])).iloc[-1])
+    if vintage_id in {"nan", "None"}:
+        return out
+
+    q_md = _load_md_vintage_quarterly_features(
+        vintage_id=vintage_id,
+        md_panel_path=Path(md_panel_path),
+        max_covariates=max_md_covariates,
+    )
+    if q_md.empty:
+        return out
+
+    q = pd.PeriodIndex(out["quarter"], freq="Q-DEC")
+    q_md_aligned = q_md.reindex(q).ffill().bfill()
+    for col in q_md_aligned.columns:
+        out[col] = pd.to_numeric(q_md_aligned[col], errors="coerce").to_numpy(dtype=float)
+    return out
+
+
+def _recursive_log_level_regression_with_covariates(
+    train_df: pd.DataFrame,
+    target_col: str,
+    horizon: int,
+    regressor_builder,
+    lags: int = 4,
+    max_covariates: int = 80,
+    include_md_features: bool = True,
+    max_md_covariates: int = 24,
+    md_panel_path: Path = DEFAULT_MD_PANEL_PATH,
+) -> np.ndarray:
+    df = train_df.copy().sort_values("quarter").reset_index(drop=True)
+    if include_md_features:
+        df = _augment_with_md_features(
+            train_df=df,
+            md_panel_path=md_panel_path,
+            max_md_covariates=max_md_covariates,
+        )
+
+    y_all = pd.to_numeric(df[target_col], errors="coerce")
+    y_mask = y_all.notna()
+    if not y_mask.any():
+        raise ValueError("No target history available.")
+
+    y = y_all[y_mask].to_numpy(dtype=float)
+    if y.size <= lags + 1 or np.any(y <= 0):
+        return np.repeat(y[-1], horizon)
+
+    q_all = pd.PeriodIndex(df["quarter"], freq="Q-DEC")
+    q_hist = pd.PeriodIndex(df.loc[y_mask, "quarter"], freq="Q-DEC")
+    q_future = [q_hist[-1] + i for i in range(1, horizon + 1)]
+
+    covariates = _select_covariates_for_wrapped_models(
+        train_df=df,
+        target_col=target_col,
+        max_covariates=max_covariates,
+    )
+    if not covariates:
+        return _recursive_log_level_regression(y=y, horizon=horizon, regressor_builder=regressor_builder, lags=lags)
+
+    cov_panel = (
+        df.assign(__q=q_all)
+        .groupby("__q", sort=True)[covariates]
+        .last()
+    )
+    cov_panel = cov_panel.reindex(pd.PeriodIndex(list(q_hist) + list(q_future), freq="Q-DEC")).ffill().bfill().fillna(0.0)
+    hist_cov = cov_panel.loc[q_hist, covariates].to_numpy(dtype=float)
+    fut_cov = cov_panel.loc[q_future, covariates].to_numpy(dtype=float)
+
+    ly = np.log(y)
+    x_rows: list[np.ndarray] = []
+    y_rows: list[float] = []
+    for t in range(lags, ly.size):
+        row = np.concatenate([ly[t - lags : t], hist_cov[t]], axis=0)
+        if not np.isfinite(row).all():
+            continue
+        x_rows.append(row)
+        y_rows.append(float(ly[t]))
+
+    if len(y_rows) < max(12, lags + 4):
+        return _recursive_log_level_regression(y=y, horizon=horizon, regressor_builder=regressor_builder, lags=lags)
+
+    x = np.asarray(x_rows, dtype=float)
+    y_target = np.asarray(y_rows, dtype=float)
+
+    model = regressor_builder()
+    model.fit(x, y_target)
+
+    hist_ly = list(ly.astype(float))
+    preds_ly: list[float] = []
+    for step in range(horizon):
+        lag_vec = np.asarray(hist_ly[-lags:], dtype=float)
+        feat = np.concatenate([lag_vec, fut_cov[step]], axis=0).reshape(1, -1)
+        pred = float(model.predict(feat)[0])
+        preds_ly.append(pred)
+        hist_ly.append(pred)
+
+    return np.exp(np.asarray(preds_ly, dtype=float))
+
+
+@dataclass
+class _TaskShim:
+    horizon: int
+    target_col: str
+    past_dynamic_columns: list[str]
+    known_dynamic_columns: list[str]
+    id_column: str = "id"
+    timestamp_column: str = "timestamp"
+    freq: str = "Q"
+
+    @property
+    def target(self) -> str:
+        return self.target_col
+
+    @property
+    def prediction_length(self) -> int:
+        return self.horizon
+
+
+def _select_covariates_for_wrapped_models(train_df: pd.DataFrame, target_col: str, max_covariates: int = 120) -> list[str]:
+    exclude = {
+        target_col,
+        "quarter",
+        "timestamp",
+        "vintage",
+        "vintage_timestamp",
+        "asof_date",
+        "__origin_vintage",
+        "__origin_schedule",
+    }
+    candidates: list[str] = []
+    for col in train_df.columns:
+        if col in exclude:
+            continue
+        if not pd.api.types.is_numeric_dtype(train_df[col]):
+            continue
+        s = pd.to_numeric(train_df[col], errors="coerce")
+        if s.notna().sum() < 8:
+            continue
+        candidates.append(col)
+    return candidates[:max_covariates]
+
+
+def _build_single_series_datasets(
+    train_df: pd.DataFrame,
+    target_col: str,
+    horizon: int,
+    covariate_cols: list[str],
+) -> tuple[Any, Any, _TaskShim]:
+    try:
+        from datasets import Dataset
+    except Exception as exc:
+        raise ImportError("datasets package is required for wrapped fev_macro model adapters.") from exc
+    df = train_df.copy().sort_values("quarter").reset_index(drop=True)
+    q_all = pd.PeriodIndex(df["quarter"], freq="Q-DEC")
+    y_all = pd.to_numeric(df[target_col], errors="coerce")
+    mask = y_all.notna()
+    if not mask.any():
+        raise ValueError("No non-missing target in train_df for wrapped model.")
+
+    q_hist = q_all[mask]
+    y_hist = y_all[mask].to_numpy(dtype=float)
+    past_ts = [period.start_time for period in q_hist]
+
+    past_row: dict[str, object] = {
+        "id": "series_1",
+        "timestamp": past_ts,
+        target_col: y_hist.tolist(),
+    }
+    for col in covariate_cols:
+        vals = pd.to_numeric(df.loc[mask, col], errors="coerce").ffill().bfill().fillna(0.0).to_numpy(dtype=float)
+        past_row[col] = vals.tolist()
+
+    last_q = q_hist[-1]
+    fut_q = [last_q + i for i in range(1, horizon + 1)]
+    future_ts = [period.start_time for period in fut_q]
+    future_row: dict[str, object] = {"id": "series_1", "timestamp": future_ts}
+    for col in covariate_cols:
+        hist_cov = pd.to_numeric(df.loc[mask, col], errors="coerce").ffill().bfill().fillna(0.0)
+        last_val = float(hist_cov.iloc[-1]) if len(hist_cov) else 0.0
+        all_cov = pd.to_numeric(df[col], errors="coerce")
+        cov_map = pd.Series(all_cov.to_numpy(dtype=float), index=q_all).groupby(level=0).last()
+
+        future_vals: list[float] = []
+        for fq in fut_q:
+            v = cov_map.get(fq, np.nan)
+            if pd.notna(v):
+                last_val = float(v)
+            future_vals.append(last_val)
+        future_row[col] = future_vals
+
+    past_data = Dataset.from_list([past_row])
+    future_data = Dataset.from_list([future_row])
+    task = _TaskShim(
+        horizon=horizon,
+        target_col=target_col,
+        past_dynamic_columns=list(covariate_cols),
+        known_dynamic_columns=list(covariate_cols),
+    )
+    return past_data, future_data, task
+
+
+class _WrappedFevModel(RealtimeModel):
+    def __init__(self, name: str, builder, max_covariates: int = 120) -> None:
+        super().__init__(name=name)
+        self._builder = builder
+        self.max_covariates = int(max_covariates)
+        self._model = None
+
+    def _get_model(self):
+        if self._model is None:
+            self._model = self._builder()
+        return self._model
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        y = _target_array(train_df=train_df, target_col=target_col)
+        covs = _select_covariates_for_wrapped_models(train_df=train_df, target_col=target_col, max_covariates=self.max_covariates)
+        try:
+            past_data, future_data, task = _build_single_series_datasets(
+                train_df=train_df,
+                target_col=target_col,
+                horizon=horizon,
+                covariate_cols=covs,
+            )
+            pred_ds = self._get_model().predict(past_data=past_data, future_data=future_data, task=task)
+            arr = np.asarray(pred_ds["predictions"][0], dtype=float).reshape(-1)
+            if arr.size != horizon or not np.isfinite(arr).all():
+                raise ValueError("Wrapped model returned invalid forecasts.")
+            return arr
+        except Exception:
+            return np.repeat(y[-1], horizon)
+
+
 class NaiveLastModel(RealtimeModel):
     def __init__(self) -> None:
         super().__init__(name="naive_last")
 
     def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
-        y = pd.to_numeric(train_df[target_col], errors="coerce").dropna().to_numpy(dtype=float)
-        if y.size == 0:
-            raise ValueError("No target history for naive_last model.")
+        y = _target_array(train_df=train_df, target_col=target_col)
         return np.repeat(y[-1], horizon)
 
 
@@ -294,9 +670,7 @@ class RandomWalkDriftLogModel(RealtimeModel):
         super().__init__(name="rw_drift_log")
 
     def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
-        y = pd.to_numeric(train_df[target_col], errors="coerce").dropna().to_numpy(dtype=float)
-        if y.size == 0:
-            raise ValueError("No target history for rw_drift_log model.")
+        y = _target_array(train_df=train_df, target_col=target_col)
         if np.any(y <= 0):
             raise ValueError("rw_drift_log requires strictly positive levels.")
 
@@ -316,9 +690,7 @@ class AR4GrowthModel(RealtimeModel):
         super().__init__(name="ar4_growth")
 
     def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
-        y = pd.to_numeric(train_df[target_col], errors="coerce").dropna().to_numpy(dtype=float)
-        if y.size == 0:
-            raise ValueError("No target history for ar4_growth model.")
+        y = _target_array(train_df=train_df, target_col=target_col)
         if np.any(y <= 0):
             raise ValueError("ar4_growth requires strictly positive levels.")
 
@@ -356,10 +728,493 @@ class AR4GrowthModel(RealtimeModel):
         return y[-1] * np.exp(cumulative)
 
 
+class MeanLevelModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="mean")
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        y = _target_array(train_df=train_df, target_col=target_col)
+        return np.repeat(float(np.mean(y)), horizon)
+
+
+class DriftLevelModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="drift")
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        y = _target_array(train_df=train_df, target_col=target_col)
+        if y.size == 1:
+            return np.repeat(y[-1], horizon)
+        slope = (y[-1] - y[0]) / float(y.size - 1)
+        steps = np.arange(1, horizon + 1, dtype=float)
+        return y[-1] + slope * steps
+
+
+class SeasonalNaiveLevelModel(RealtimeModel):
+    def __init__(self, season_length: int = 4) -> None:
+        super().__init__(name="seasonal_naive")
+        self.season_length = int(season_length)
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        y = _target_array(train_df=train_df, target_col=target_col)
+        template = y[-self.season_length :] if y.size >= self.season_length else y
+        return np.resize(template, horizon)
+
+
+class RandomNormalModel(RealtimeModel):
+    def __init__(self, seed: int = 0) -> None:
+        super().__init__(name="random_normal")
+        self.seed = int(seed)
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        y = _target_array(train_df=train_df, target_col=target_col)
+        rng = np.random.default_rng(self.seed)
+        mu = float(np.mean(y))
+        sigma = float(np.std(y, ddof=1)) if y.size > 1 else 0.0
+        sigma = max(sigma, 1e-9)
+        return rng.normal(loc=mu, scale=sigma, size=horizon).astype(float)
+
+
+class RandomUniformModel(RealtimeModel):
+    def __init__(self, seed: int = 0) -> None:
+        super().__init__(name="random_uniform")
+        self.seed = int(seed)
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        y = _target_array(train_df=train_df, target_col=target_col)
+        rng = np.random.default_rng(self.seed)
+        lo = float(np.min(y))
+        hi = float(np.max(y))
+        if np.isclose(lo, hi):
+            return np.repeat(lo, horizon)
+        return rng.uniform(low=lo, high=hi, size=horizon).astype(float)
+
+
+class RandomPermutationModel(RealtimeModel):
+    def __init__(self, seed: int = 0) -> None:
+        super().__init__(name="random_permutation")
+        self.seed = int(seed)
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        y = _target_array(train_df=train_df, target_col=target_col)
+        rng = np.random.default_rng(self.seed)
+        perm = rng.permutation(y)
+        if perm.size >= horizon:
+            return perm[:horizon].astype(float)
+        reps = int(np.ceil(horizon / perm.size))
+        return np.tile(perm, reps)[:horizon].astype(float)
+
+
+class AutoARIMALevelModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="auto_arima")
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        y = _target_array(train_df=train_df, target_col=target_col)
+        ds_col = "quarter" if "quarter" in train_df.columns else None
+        if ds_col is None:
+            ds = pd.period_range("2000Q1", periods=y.size, freq="Q-DEC").to_timestamp(how="end")
+        else:
+            ds = pd.PeriodIndex(train_df.loc[train_df[target_col].notna(), ds_col], freq="Q-DEC").to_timestamp(how="end")
+        sf_df = pd.DataFrame({"unique_id": "__series__", "ds": ds, "y": y})
+
+        try:
+            from statsforecast import StatsForecast
+            from statsforecast.models import AutoARIMA
+
+            sf = StatsForecast(models=[AutoARIMA(season_length=4)], freq="Q")
+            fc = sf.forecast(df=sf_df, h=horizon)
+            point_col = [c for c in fc.columns if c not in {"unique_id", "ds"}][0]
+            return fc[point_col].to_numpy(dtype=float)
+        except Exception:
+            return np.repeat(y[-1], horizon)
+
+
+class AutoETSLevelModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="auto_ets")
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        y = _target_array(train_df=train_df, target_col=target_col)
+        ds = pd.period_range("2000Q1", periods=y.size, freq="Q-DEC").to_timestamp(how="end")
+        sf_df = pd.DataFrame({"unique_id": "__series__", "ds": ds, "y": y})
+
+        try:
+            from statsforecast import StatsForecast
+            from statsforecast.models import AutoETS
+
+            try:
+                model = AutoETS(season_length=4)
+            except TypeError:
+                model = AutoETS()
+            sf = StatsForecast(models=[model], freq="Q")
+            fc = sf.forecast(df=sf_df, h=horizon)
+            point_col = [c for c in fc.columns if c not in {"unique_id", "ds"}][0]
+            return fc[point_col].to_numpy(dtype=float)
+        except Exception:
+            return np.repeat(y[-1], horizon)
+
+
+class ThetaLevelModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="theta")
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        y = _target_array(train_df=train_df, target_col=target_col)
+        ds = pd.period_range("2000Q1", periods=y.size, freq="Q-DEC").to_timestamp(how="end")
+        sf_df = pd.DataFrame({"unique_id": "__series__", "ds": ds, "y": y})
+
+        try:
+            from statsforecast import StatsForecast
+            from statsforecast.models import Theta
+
+            try:
+                model = Theta(season_length=4)
+            except TypeError:
+                model = Theta()
+            sf = StatsForecast(models=[model], freq="Q")
+            fc = sf.forecast(df=sf_df, h=horizon)
+            point_col = [c for c in fc.columns if c not in {"unique_id", "ds"}][0]
+            return fc[point_col].to_numpy(dtype=float)
+        except Exception:
+            return np.repeat(y[-1], horizon)
+
+
+class LocalTrendSSMModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="local_trend_ssm")
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        y = _target_array(train_df=train_df, target_col=target_col)
+        if y.size < 6:
+            return np.repeat(y[-1], horizon)
+
+        try:
+            from statsmodels.tsa.statespace.structural import UnobservedComponents
+
+            model = UnobservedComponents(endog=np.log(y), level="local linear trend")
+            res = model.fit(disp=False)
+            pred_log = np.asarray(res.forecast(steps=horizon), dtype=float)
+            return np.exp(pred_log)
+        except Exception:
+            return np.repeat(y[-1], horizon)
+
+
+class RandomForestLevelModel(RealtimeModel):
+    def __init__(
+        self,
+        seed: int = 0,
+        lags: int = 4,
+        max_covariates: int = 80,
+        max_md_covariates: int = 24,
+        md_panel_path: Path = DEFAULT_MD_PANEL_PATH,
+    ) -> None:
+        super().__init__(name="random_forest")
+        self.seed = int(seed)
+        self.lags = int(lags)
+        self.max_covariates = int(max_covariates)
+        self.max_md_covariates = int(max_md_covariates)
+        self.md_panel_path = Path(md_panel_path)
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        def _builder():
+            from sklearn.ensemble import RandomForestRegressor
+
+            return RandomForestRegressor(
+                n_estimators=300,
+                max_depth=6,
+                random_state=self.seed,
+                n_jobs=1,
+            )
+
+        return _recursive_log_level_regression_with_covariates(
+            train_df=train_df,
+            target_col=target_col,
+            horizon=horizon,
+            regressor_builder=_builder,
+            lags=self.lags,
+            max_covariates=self.max_covariates,
+            include_md_features=True,
+            max_md_covariates=self.max_md_covariates,
+            md_panel_path=self.md_panel_path,
+        )
+
+
+class XGBoostLevelModel(RealtimeModel):
+    def __init__(
+        self,
+        seed: int = 0,
+        lags: int = 4,
+        max_covariates: int = 80,
+        max_md_covariates: int = 24,
+        md_panel_path: Path = DEFAULT_MD_PANEL_PATH,
+    ) -> None:
+        super().__init__(name="xgboost")
+        self.seed = int(seed)
+        self.lags = int(lags)
+        self.max_covariates = int(max_covariates)
+        self.max_md_covariates = int(max_md_covariates)
+        self.md_panel_path = Path(md_panel_path)
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        def _builder():
+            import xgboost as xgb
+
+            return xgb.XGBRegressor(
+                objective="reg:squarederror",
+                n_estimators=300,
+                max_depth=3,
+                learning_rate=0.05,
+                subsample=0.9,
+                colsample_bytree=0.9,
+                random_state=self.seed,
+                n_jobs=1,
+            )
+
+        return _recursive_log_level_regression_with_covariates(
+            train_df=train_df,
+            target_col=target_col,
+            horizon=horizon,
+            regressor_builder=_builder,
+            lags=self.lags,
+            max_covariates=self.max_covariates,
+            include_md_features=True,
+            max_md_covariates=self.max_md_covariates,
+            md_panel_path=self.md_panel_path,
+        )
+
+
+class FactorPCAQDRealtimeModel(_WrappedFevModel):
+    def __init__(self) -> None:
+        super().__init__(
+            name="factor_pca_qd",
+            builder=lambda: __import__("fev_macro.models.factor_models", fromlist=["QuarterlyFactorPCAModel"]).QuarterlyFactorPCAModel(),
+            max_covariates=120,
+        )
+
+
+class BVARMinnesota8RealtimeModel(_WrappedFevModel):
+    def __init__(self) -> None:
+        super().__init__(
+            name="bvar_minnesota_8",
+            builder=lambda: __import__("fev_macro.models.bvar_minnesota", fromlist=["BVARMinnesota8Model"]).BVARMinnesota8Model(),
+            max_covariates=120,
+        )
+
+
+class BVARMinnesota20RealtimeModel(_WrappedFevModel):
+    def __init__(self) -> None:
+        super().__init__(
+            name="bvar_minnesota_20",
+            builder=lambda: __import__("fev_macro.models.bvar_minnesota", fromlist=["BVARMinnesota20Model"]).BVARMinnesota20Model(),
+            max_covariates=120,
+        )
+
+
+class Chronos2RealtimeModel(_WrappedFevModel):
+    def __init__(self) -> None:
+        super().__init__(
+            name="chronos2",
+            builder=lambda: __import__("fev_macro.models.chronos2", fromlist=["Chronos2Model"]).Chronos2Model(),
+            max_covariates=40,
+        )
+
+
+class MixedFreqDFMMDVintageModel(RealtimeModel):
+    def __init__(
+        self,
+        md_panel_path: str = "data/panels/fred_md_vintage_panel.parquet",
+        max_monthly_covariates: int = 100,
+        n_factors: int = 6,
+        max_lag: int = 2,
+        alpha: float = 1.0,
+        seed: int = 0,
+    ) -> None:
+        super().__init__(name="mixed_freq_dfm_md")
+        self.md_panel_path = Path(md_panel_path)
+        self.max_monthly_covariates = int(max_monthly_covariates)
+        self.n_factors = int(n_factors)
+        self.max_lag = int(max_lag)
+        self.alpha = float(alpha)
+        self.seed = int(seed)
+        self._panel: pd.DataFrame | None = None
+        self._cache_quarterly: dict[str, pd.DataFrame] = {}
+
+    def _load_panel(self) -> pd.DataFrame:
+        if self._panel is not None:
+            return self._panel
+        if not self.md_panel_path.exists():
+            raise FileNotFoundError(f"FRED-MD vintage panel not found: {self.md_panel_path}")
+        df = pd.read_parquet(self.md_panel_path)
+        df["vintage"] = df["vintage"].astype(str)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+        keep = [c for c in df.columns if c not in {"vintage", "vintage_timestamp", "timestamp"}]
+        keep = keep[: self.max_monthly_covariates]
+        out = df[["vintage", "timestamp", *keep]].copy()
+        for c in keep:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+        out = out.sort_values(["vintage", "timestamp"]).reset_index(drop=True)
+        self._panel = out
+        return out
+
+    def _quarterly_factors(self, vintage_id: str) -> pd.DataFrame:
+        if vintage_id in self._cache_quarterly:
+            return self._cache_quarterly[vintage_id]
+
+        panel = self._load_panel()
+        sub = panel.loc[panel["vintage"] == str(vintage_id)].copy()
+        if sub.empty:
+            raise ValueError(f"No FRED-MD vintage rows for {vintage_id}")
+        covars = [c for c in sub.columns if c not in {"vintage", "timestamp"}]
+        sub = sub.sort_values("timestamp")
+        sub[covars] = sub[covars].ffill().bfill().fillna(0.0)
+        sub["quarter"] = sub["timestamp"].dt.to_period("Q-DEC")
+        q = sub.groupby("quarter", sort=True)[covars].mean(numeric_only=True).ffill().bfill().fillna(0.0)
+        self._cache_quarterly[vintage_id] = q
+        return q
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        y_series = pd.to_numeric(train_df[target_col], errors="coerce")
+        y_mask = y_series.notna()
+        if not y_mask.any():
+            raise ValueError("No target history available.")
+        y = y_series[y_mask].to_numpy(dtype=float)
+        y_quarters = pd.PeriodIndex(train_df.loc[y_mask, "quarter"], freq="Q-DEC")
+        if y.size < 20:
+            return np.repeat(y[-1], horizon)
+
+        vintage_id = str(train_df.get("__origin_vintage", pd.Series([np.nan])).iloc[-1])
+        if vintage_id in {"nan", "None"}:
+            return np.repeat(y[-1], horizon)
+
+        try:
+            qf = self._quarterly_factors(vintage_id=vintage_id)
+        except Exception:
+            return np.repeat(y[-1], horizon)
+
+        cutoff_q = pd.Period(train_df["quarter"].max(), freq="Q-DEC")
+        qf = qf.loc[qf.index <= cutoff_q]
+        if qf.empty:
+            return np.repeat(y[-1], horizon)
+
+        qf_train = qf.reindex(y_quarters).ffill().bfill().fillna(0.0)
+        if qf_train.empty:
+            return np.repeat(y[-1], horizon)
+        F_past = qf_train.to_numpy(dtype=float)
+
+        future_quarters = [y_quarters[-1] + i for i in range(1, horizon + 1)]
+        last_factor = F_past[-1].copy()
+        future_rows: list[np.ndarray] = []
+        for fq in future_quarters:
+            if fq in qf.index:
+                vec = qf.loc[fq].to_numpy(dtype=float)
+                vec = np.where(np.isfinite(vec), vec, last_factor)
+                last_factor = vec
+            else:
+                vec = last_factor
+            future_rows.append(vec.copy())
+        F_future = np.vstack(future_rows)
+
+        try:
+            from sklearn.decomposition import PCA
+            from sklearn.linear_model import Ridge
+            from sklearn.preprocessing import StandardScaler
+        except Exception:
+            return np.repeat(y[-1], horizon)
+
+        lag = min(self.max_lag, max(1, y.size // 12))
+        if y.size <= lag + 4:
+            return np.repeat(y[-1], horizon)
+
+        scaler = StandardScaler(with_mean=True, with_std=True)
+        F_scaled = scaler.fit_transform(F_past)
+        n_f = max(1, min(self.n_factors, F_scaled.shape[1], F_scaled.shape[0] - 1))
+        pca = PCA(n_components=n_f, random_state=self.seed)
+        Z_past = pca.fit_transform(F_scaled)
+        Z_future = pca.transform(scaler.transform(F_future))
+
+        rows: list[np.ndarray] = []
+        targets: list[float] = []
+        for t in range(lag, y.size):
+            rows.append(np.concatenate([y[t - lag : t], Z_past[t]], axis=0))
+            targets.append(float(y[t]))
+
+        X_train = np.vstack(rows)
+        y_train = np.asarray(targets, dtype=float)
+        if y_train.size < max(10, lag + 3):
+            return np.repeat(y[-1], horizon)
+
+        reg = Ridge(alpha=self.alpha, random_state=self.seed)
+        reg.fit(X_train, y_train)
+
+        y_hist = list(y.astype(float))
+        forecasts: list[float] = []
+        for step in range(horizon):
+            lag_vals = np.asarray(y_hist[-lag:], dtype=float)
+            if lag_vals.size < lag:
+                lag_vals = np.pad(lag_vals, (lag - lag_vals.size, 0), mode="edge")
+            feat = np.concatenate([lag_vals, Z_future[step]], axis=0)
+            pred = float(reg.predict(feat.reshape(1, -1))[0])
+            if not np.isfinite(pred):
+                pred = float(y_hist[-1])
+            forecasts.append(pred)
+            y_hist.append(pred)
+        return np.asarray(forecasts, dtype=float)
+
+
+class EnsembleAvgTop3RealtimeModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="ensemble_avg_top3")
+        self.members = [DriftLevelModel(), AutoARIMALevelModel(), LocalTrendSSMModel()]
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        preds = [m.forecast_levels(train_df=train_df, horizon=horizon, target_col=target_col) for m in self.members]
+        arr = np.stack(preds, axis=0)
+        return arr.mean(axis=0)
+
+
+class EnsembleWeightedTop5RealtimeModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="ensemble_weighted_top5")
+        self.members = [
+            DriftLevelModel(),
+            AutoARIMALevelModel(),
+            LocalTrendSSMModel(),
+            FactorPCAQDRealtimeModel(),
+            SeasonalNaiveLevelModel(season_length=4),
+        ]
+        self.weights = np.asarray([0.28, 0.25, 0.20, 0.17, 0.10], dtype=float)
+        self.weights = self.weights / self.weights.sum()
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        preds = [m.forecast_levels(train_df=train_df, horizon=horizon, target_col=target_col) for m in self.members]
+        arr = np.stack(preds, axis=0)
+        return np.tensordot(self.weights, arr, axes=(0, 0))
+
+
 BUILTIN_MODELS: dict[str, type[RealtimeModel]] = {
+    "mean": MeanLevelModel,
+    "drift": DriftLevelModel,
+    "seasonal_naive": SeasonalNaiveLevelModel,
     "naive_last": NaiveLastModel,
+    "random_normal": RandomNormalModel,
+    "random_uniform": RandomUniformModel,
+    "random_permutation": RandomPermutationModel,
     "rw_drift_log": RandomWalkDriftLogModel,
     "ar4_growth": AR4GrowthModel,
+    "auto_arima": AutoARIMALevelModel,
+    "auto_ets": AutoETSLevelModel,
+    "theta": ThetaLevelModel,
+    "local_trend_ssm": LocalTrendSSMModel,
+    "random_forest": RandomForestLevelModel,
+    "xgboost": XGBoostLevelModel,
+    "factor_pca_qd": FactorPCAQDRealtimeModel,
+    "bvar_minnesota_8": BVARMinnesota8RealtimeModel,
+    "bvar_minnesota_20": BVARMinnesota20RealtimeModel,
+    "mixed_freq_dfm_md": MixedFreqDFMMDVintageModel,
+    "chronos2": Chronos2RealtimeModel,
+    "ensemble_avg_top3": EnsembleAvgTop3RealtimeModel,
+    "ensemble_weighted_top5": EnsembleWeightedTop5RealtimeModel,
 }
 
 
@@ -462,6 +1317,7 @@ def run_backtest(
     origin_schedule: str = "quarterly",
     release_stages: Sequence[str] | None = None,
     min_target_quarter: str | pd.Period | None = "2018Q1",
+    ragged_edge_covariates: bool = True,
 ) -> pd.DataFrame:
     if origin_schedule not in {"quarterly", "monthly"}:
         raise ValueError("origin_schedule must be one of {'quarterly', 'monthly'}")
@@ -513,6 +1369,8 @@ def run_backtest(
         observed_quarter = pd.Period(origin.observed_quarter, freq="Q-DEC")
         vintage_id = str(origin.origin_vintage)
 
+        covariate_cutoff = observed_quarter + max_h if ragged_edge_covariates else observed_quarter
+
         try:
             ds = build_origin_datasets(
                 origin_quarter=observed_quarter + 1,
@@ -522,20 +1380,30 @@ def run_backtest(
                 target_col=target_col,
                 train_window=train_window,
                 rolling_size=rolling_size,
-                cutoff_quarter=observed_quarter,
+                cutoff_quarter=covariate_cutoff,
             )
         except ValueError:
             # Skip origins where selected vintage/cutoff does not provide a usable training sample.
             continue
 
-        train_df = ds["train_df"]
-        n_train = int(ds["n_train"])
+        train_df = ds["train_df"].copy()
+        if ragged_edge_covariates:
+            future_target_mask = pd.PeriodIndex(train_df["quarter"], freq="Q-DEC") > observed_quarter
+            if future_target_mask.any():
+                train_df.loc[future_target_mask, target_col] = np.nan
+        train_df["__origin_vintage"] = vintage_id
+        train_df["__origin_schedule"] = str(origin.origin_schedule)
+        train_y = pd.to_numeric(train_df[target_col], errors="coerce")
+        obs_mask = train_y.notna()
+        if not obs_mask.any():
+            continue
+        obs_quarters = pd.PeriodIndex(train_df.loc[obs_mask, "quarter"], freq="Q-DEC")
+        training_min_quarter = pd.Period(obs_quarters.min(), freq="Q-DEC")
+        training_max_quarter = pd.Period(obs_quarters.max(), freq="Q-DEC")
+        n_train = int(obs_mask.sum())
         if n_train < int(min_train_observations):
             continue
-
-        last_observed = float(ds["last_observed_level"])
-        training_min_quarter = pd.Period(ds["training_min_quarter"], freq="Q-DEC")
-        training_max_quarter = pd.Period(ds["training_max_quarter"], freq="Q-DEC")
+        last_observed = float(train_y.loc[obs_mask].iloc[-1])
 
         for model in model_list:
             path = np.asarray(model.forecast_levels(train_df=train_df, horizon=max_h, target_col=target_col), dtype=float)
@@ -588,6 +1456,7 @@ def run_backtest(
                             "origin_vintage_asof_date": pd.Timestamp(origin.origin_vintage_asof_date).date().isoformat(),
                             "training_min_quarter": str(training_min_quarter),
                             "training_max_quarter": str(training_max_quarter),
+                            "covariate_cutoff_quarter": str(covariate_cutoff),
                             "target_quarter": str(target_quarter),
                             "horizon": int(h),
                             "release_stage": stage,

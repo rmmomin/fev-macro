@@ -62,8 +62,8 @@ The harness is designed so models can be added modularly and compared fairly und
 | `random_permutation` | Randomly permuted historical values | Target history only |
 | `auto_arima` | StatsForecast AutoARIMA | Target history only (univariate) |
 | `local_trend_ssm` | Unobserved Components local trend/cycle | Target history only (univariate) |
-| `random_forest` | AR + exogenous random forest, recursive multi-step | Target lags + lagged/known dynamic covariates from FRED-QD task columns |
-| `xgboost` | Gradient-boosted AR + exogenous model, recursive multi-step | Target lags + lagged/known dynamic covariates from FRED-QD task columns |
+| `random_forest` | AR + exogenous random forest, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel.parquet` (quarterly aggregated by vintage) |
+| `xgboost` | Gradient-boosted AR + exogenous model, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel.parquet` (quarterly aggregated by vintage) |
 | `bvar_minnesota_8` | Minnesota-style shrinkage BVAR (~8 total vars including GDP) | Target + selected macro covariates (~7) from FRED-QD |
 | `bvar_minnesota_20` | Minnesota-style shrinkage BVAR (~20 total vars including GDP) | Target + selected macro covariates (~19) from FRED-QD |
 | `factor_pca_qd` | Quarterly PCA factor regression | Target lags + PCA factors from up to ~80 FRED-QD covariates |
@@ -171,6 +171,7 @@ This repo includes a vintage-correct rolling OOS evaluator in:
   - latest vintage with `asof_date <= origin_date`
 - Leakage guard:
   - training uses only quarters `<= q-1` at that origin
+  - covariates can use ragged-edge rows from the selected vintage for forecast quarters (target GDP remains unobserved and excluded from training targets)
 
 ### First-release target definition
 
@@ -220,6 +221,47 @@ Outputs:
   - `origin_quarter, target_quarter, horizon, y_hat_level, y_true_level_first, g_hat_saar, g_true_saar, ...`
 - `metrics.csv`
   - `model, horizon, release_stage, months_to_first_release_bucket, rmse, mae, rmse_log_level, mae_log_level, rel_rmse, sample_count`
+
+## Latest-Vintage One-Shot Forecast
+
+For a single nowcast/forecast using all information in one chosen vintage (for example `2026-01`) and a requested target quarter:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_latest_vintage_forecast.py \
+  --vintage 2026-01 \
+  --target_quarter 2025Q4 \
+  --output_csv results/realtime_latest_v2026m1_2025Q4_forecasts.csv
+```
+
+Behavior:
+
+- Finds the latest observed quarter in the selected vintage.
+- Trains each model on observed target history through that quarter.
+- Uses covariate data through the requested target quarter when available in the same vintage (ragged-edge nowcast inputs; target values remain unavailable/unseen).
+- Forecasts forward to the requested target quarter.
+- Writes a CSV including level, q/q %, and SAAR forecast columns.
+
+You can also run default settings with:
+
+```bash
+make latest-forecast
+```
+
+## Plot 2025Q4 Forecast Comparison
+
+Create a sorted column chart (lowest to highest) for selected models' 2025Q4 q/q SAAR forecasts:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/plot_2025q4_forecast_selected_models.py \
+  --input_csv results/realtime_latest_v2026m1_2025Q4_forecasts.csv \
+  --target_quarter 2025Q4 \
+  --models rw_drift_log auto_ets drift theta chronos2 \
+  --output_png results/forecast_2025Q4_qoq_saar_rw_autoets_drift_theta_chronos2.png
+```
+
+Output:
+
+- `results/forecast_2025Q4_qoq_saar_rw_autoets_drift_theta_chronos2.png`
 
 ## Running The Benchmark
 
@@ -302,6 +344,9 @@ Primary outputs in each run directory:
 - `src/fev_macro/models/`: model implementations and registry
 - `src/fev_macro/report.py`: leaderboard/pairwise generation
 - `scripts/run_eval.py`: main benchmark CLI
+- `scripts/run_realtime_oos.py`: vintage-correct realtime OOS CLI
+- `scripts/run_latest_vintage_forecast.py`: one-shot latest-vintage forecast CLI
 - `scripts/plot_top_models.py`: top-model OOS plot generation
+- `scripts/plot_2025q4_forecast_selected_models.py`: selected-model 2025Q4 forecast bar chart
 - `scripts/download_historical_vintages.py`: vintage downloader
 - `Makefile`: setup/run/report helpers
