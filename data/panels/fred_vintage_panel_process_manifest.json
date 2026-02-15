@@ -1,0 +1,29 @@
+{
+  "md": {
+    "input_panel": "/Users/rayhanmomin/code/fev-macro/data/panels/fred_md_vintage_panel.parquet",
+    "output_panel": "/Users/rayhanmomin/code/fev-macro/data/panels/fred_md_vintage_panel_process.parquet",
+    "vintage_dir": "/Users/rayhanmomin/code/fev-macro/data/historical/md/vintages_1999_2026",
+    "input_rows": 205269,
+    "output_rows": 204633,
+    "vintage_count": 318,
+    "variable_count": 144,
+    "drop_initial_rows": 2,
+    "outliers_removed": 25495
+  },
+  "qd": {
+    "input_panel": "/Users/rayhanmomin/code/fev-macro/data/panels/fred_qd_vintage_panel.parquet",
+    "output_panel": "/Users/rayhanmomin/code/fev-macro/data/panels/fred_qd_vintage_panel_process.parquet",
+    "vintage_dir": "/Users/rayhanmomin/code/fev-macro/data/historical/qd/vintages_2018_2026",
+    "input_rows": 23467,
+    "output_rows": 23467,
+    "vintage_count": 93,
+    "variable_count": 259,
+    "drop_initial_rows": 0,
+    "outliers_removed": 0
+  },
+  "notes": {
+    "transform_logic": "FRED tcodes 1-7 from MATLAB prepare_missing.m and R fredmd.R/fredqd.R",
+    "md_outlier_rule": "abs(x - median) > 10*IQR from MATLAB remove_outliers.m and R rm_outliers.fredmd",
+    "applied_by": "vintage slice"
+  }
+}
