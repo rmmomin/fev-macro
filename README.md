@@ -54,6 +54,7 @@ The harness is designed so models can be added modularly and compared fairly und
 | Model | What it is | Features used |
 |---|---|---|
 | `naive_last` | Random-walk/last-observation baseline | Target history only |
+| `rw_drift_log` | Log-space random walk with constant drift, exponentiated back to levels | Target history only (requires strictly positive levels) |
 | `mean` | Historical mean baseline | Target history only |
 | `drift` | Linear drift from first to last point | Target history only |
 | `seasonal_naive` | Seasonal repeat (quarterly season length = 4) | Target history only |
@@ -75,6 +76,7 @@ The harness is designed so models can be added modularly and compared fairly und
 Notes:
 
 - Models that use covariates consume all available task dynamic columns unless a model-specific cap/selection is applied.
+- `rw_drift_log` and `ar4_growth` are defined in the realtime OOS module and are used by `scripts/run_realtime_oos.py` and `scripts/run_latest_vintage_forecast.py`.
 - Registered but not in the default run list: `auto_ets`, `theta`.
 
 ## Real-Time Data Policy: Training vs Testing
