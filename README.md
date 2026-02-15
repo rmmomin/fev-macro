@@ -174,6 +174,36 @@ Outputs:
 - `data/panels/fred_md_vintage_panel.parquet`
 - `data/panels/fred_qd_vintage_panel.parquet`
 
+## Fetch Latest FRED MD/QD (Month-End Indexed)
+
+Use the API fetch script to build refreshed "latest snapshot" CSVs that mirror the historical MD/QD templates:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/fetch_latest_fred_api.py --output_dir data/latest
+```
+
+Requirements:
+
+- `FRED_API_KEY` must be set (for example in `.env`; `.env` is gitignored).
+
+Outputs:
+
+- `data/latest/fred_md_latest.csv`
+- `data/latest/fred_qd_latest.csv`
+- `data/latest/fred_latest_fetch_manifest.json`
+- `data/latest/fred_latest_coverage_gaps.json`
+
+Date alignment policy:
+
+- Both output datasets are written on a month-end `sasdate` index only.
+- Monthly template variables map to each calendar month end.
+- Quarterly template variables map to quarter-end month ends (`Mar 31`, `Jun 30`, `Sep 30`, `Dec 31`).
+
+Series coverage:
+
+- The script includes direct FRED pulls plus calibrated construction for unresolved derived variables (for example spread/ratio variables).
+- Coverage summaries are reported against template availability and include period-aligned diagnostics.
+
 ## Processed FRED Datasets
 
 This repository also includes scripts that apply the documented FRED-MD/FRED-QD preprocessing rules from the McCracken/Ng MATLAB code and the `fbi` R package implementation:
