@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
         "--exclude_years",
         type=int,
         nargs="*",
-        default=[2020],
+        default=[],
         help="Calendar years excluded from model training/evaluation windows.",
     )
     parser.add_argument(

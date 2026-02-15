@@ -4,7 +4,12 @@ from collections.abc import Callable
 
 from .base import BaseModel
 from .baselines import Drift, Mean, NaiveLast, SeasonalNaive
-from .bvar_minnesota import BVARMinnesota20Model, BVARMinnesota8Model
+from .bvar_minnesota import (
+    BVARMinnesota20Model,
+    BVARMinnesota8Model,
+    BVARMinnesotaGrowth20Model,
+    BVARMinnesotaGrowth8Model,
+)
 from .chronos2 import Chronos2Model
 from .ensemble import EnsembleAvgTop3Model, EnsembleWeightedTop5Model
 from .factor_models import MixedFrequencyDFMModel, QuarterlyFactorPCAModel
@@ -38,6 +43,8 @@ MODEL_REGISTRY: dict[str, ModelBuilder] = {
     "local_trend_ssm": _no_seed(LocalTrendStateSpaceModel),
     "bvar_minnesota_8": _no_seed(BVARMinnesota8Model),
     "bvar_minnesota_20": _no_seed(BVARMinnesota20Model),
+    "bvar_minnesota_growth_8": _no_seed(BVARMinnesotaGrowth8Model),
+    "bvar_minnesota_growth_20": _no_seed(BVARMinnesotaGrowth20Model),
     "factor_pca_qd": lambda seed: QuarterlyFactorPCAModel(seed=seed),
     "mixed_freq_dfm_md": lambda seed: MixedFrequencyDFMModel(seed=seed),
     "ensemble_avg_top3": _no_seed(EnsembleAvgTop3Model),

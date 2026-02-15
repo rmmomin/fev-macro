@@ -4,17 +4,43 @@ Reproducible macro-forecasting benchmark harness built on `fev` rolling backtest
 
 ## Quickstart
 
+Setup:
+
 ```bash
 pip install -r requirements.txt
 make download-historical
 make panel-md panel-qd
-PYTHONPATH=src .venv/bin/python scripts/run_eval.py --models naive_last drift --num_windows 5 --horizons 1
-PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py --smoke_run
-PYTHONPATH=src .venv/bin/python scripts/run_latest_vintage_forecast.py --vintage latest --target_quarter 2025Q4
-PYTHONPATH=src .venv/bin/python scripts/plot_2025q4_forecast_selected_models.py --input_csv results/realtime_latest_vintage_forecast.csv
 ```
 
-Benchmark mode (`scripts/run_eval.py`) defaults to release-table GDP truth, while realtime mode uses vintage panels and release-aware scoring (`scripts/run_realtime_oos.py`).
+Unprocessed LL benchmark (raw covariates + `log_level` target):
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_eval_unprocessed.py --num_windows 5 --horizons 1
+```
+
+Processed G benchmark (transformed covariates + `saar_growth` target):
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_eval_processed.py --num_windows 5 --horizons 1
+```
+
+Both scripts write comparable outputs (`summaries.*`, `leaderboard.csv`, `pairwise.csv`) plus KPI files:
+
+- `kpi_metrics.csv` (overall q/q SAAR KPI metrics)
+- `kpi_subperiod_metrics.csv` (pre-COVID, COVID, post-COVID slices)
+
+Legacy `scripts/run_eval.py` remains available as a thin wrapper.
+
+## Why LL vs G differs by covariate mode
+
+- `run_eval_unprocessed.py`: raw FRED-QD covariates pair better with level-style dynamics, so default target is `log_level` and model defaults use trend/level-oriented baselines.
+- `run_eval_processed.py`: transformed/stationary-ish covariates pair better with direct growth forecasting, so default target is `saar_growth` and growth-prior BVAR variants are used by default.
+
+## COVID handling
+
+- Year 2020 is no longer dropped by default.
+- Optional filtering is still available via `--exclude_years ...`.
+- COVID effects are handled in reporting via `kpi_subperiod_metrics.csv` (`pre_covid`, `covid_2020Q1_2021Q1`, `post_covid`) instead of deleting observations.
 
 ## Objective
 
@@ -43,10 +69,13 @@ The harness is designed so models can be added modularly and compared fairly und
     - `level`: `y_t`
     - `log_level`: `log(y_t)`
     - `saar_growth`: `100 * ((y_t / y_{t-1})**4 - 1)`
-- Covariate construction: benchmark task datasets are release-table-only (univariate scaffold), while historical-vintage adaptation continues to use local FRED-QD vintage data.
+- Covariate construction:
+  - `run_eval_unprocessed.py`: raw FRED-QD covariates (`covariate_mode=unprocessed`).
+  - `run_eval_processed.py`: transform-code covariates (`covariate_mode=processed`).
+  - `run_eval.py`: legacy univariate wrapper (covariates disabled by default).
 - Backtest engine: `fev.Task.iter_windows()` (expanding windows).
 - Default metric: `RMSE`.
-- Exclusion rule: year `2020` is removed from training/evaluation data.
+- Exclusion rule: no year is excluded by default; use `--exclude_years` for optional filtering.
 
 ## Model Set And Feature Usage
 
@@ -112,7 +141,7 @@ The harness enforces a vintage-aware protocol:
    - `qoq_saar_growth_realtime_first_pct`
    - `qoq_saar_growth_realtime_second_pct`
    - `qoq_saar_growth_realtime_third_pct`
-4. Exclude configured years (default: 2020).
+4. Optionally exclude configured years via `--exclude_years` (default keeps all years, including 2020).
 5. For each rolling window, identify the training cutoff date.
 6. Select the latest historical FRED-QD vintage file with vintage month `<=` that cutoff.
 7. Replace `past_data` (training history) with data from that selected vintage.
@@ -132,9 +161,10 @@ This repo ports the transformation logic from [`enweg/FredMDQD.jl`](https://gith
 - `6`: `Δ²log(x)`
 - `7`: `Δ(x_t / x_{t-1} - 1)`
 
-By default, transform codes are loaded from the latest file under `--historical_qd_dir` and applied to covariates for both:
+Transform-code application is controlled by covariate mode:
 
-- per-window historical-vintage training reconstruction (`HistoricalQuarterlyVintageProvider`)
+- `covariate_mode=processed`: transform codes are applied to covariates.
+- `covariate_mode=unprocessed`: raw values are used (no transform-code application).
 
 ### Strict vintage coverage
 
@@ -473,7 +503,7 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src .venv/bin/python scripts/run_
 
 Observed run details:
 
-- Target: `LOG_REAL_GDP` (`saar_growth`), excluding year `2020`.
+- Target: `LOG_REAL_GDP` (`saar_growth`), with no default year exclusion.
 - Evaluation truth: `data/panels/gdpc1_releases_first_second_third.csv` realtime SAAR columns (`first/second/third`).
 - Built task datasets:
   - `results/log_real_gdp_dataset_first.parquet`

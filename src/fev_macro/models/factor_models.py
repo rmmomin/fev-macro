@@ -181,7 +181,7 @@ class MixedFrequencyDFMModel(BaseModel):
         n_factors: int = 6,
         max_lag: int = 2,
         alpha: float = 1.0,
-        excluded_years: tuple[int, ...] = (2020,),
+        excluded_years: tuple[int, ...] = (),
         seed: int = 0,
     ) -> None:
         super().__init__(name="mixed_freq_dfm_md")

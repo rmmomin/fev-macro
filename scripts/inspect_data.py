@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
         "--exclude_years",
         type=int,
         nargs="*",
-        default=[2020],
+        default=[],
         help="Calendar years excluded from inspected target series.",
     )
     return parser.parse_args()

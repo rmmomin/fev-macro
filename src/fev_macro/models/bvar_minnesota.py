@@ -44,6 +44,7 @@ class _MinnesotaBVARBase(BaseModel):
         lambda_shrink: float = 5.0,
         cross_weight: float = 2.0,
         lag_decay: float = 1.5,
+        own_lag1_prior_mean: float = 1.0,
     ) -> None:
         super().__init__(name=name)
         self.max_covariates = int(max_covariates)
@@ -51,6 +52,7 @@ class _MinnesotaBVARBase(BaseModel):
         self.lambda_shrink = float(lambda_shrink)
         self.cross_weight = float(cross_weight)
         self.lag_decay = float(lag_decay)
+        self.own_lag1_prior_mean = float(own_lag1_prior_mean)
 
     def predict(self, past_data: Dataset, future_data: Dataset, task: Any) -> Dataset:
         horizon = get_task_horizon(task)
@@ -122,6 +124,7 @@ class _MinnesotaBVARBase(BaseModel):
             lambda_shrink=self.lambda_shrink,
             cross_weight=self.cross_weight,
             lag_decay=self.lag_decay,
+            own_lag1_prior_mean=self.own_lag1_prior_mean,
         )
         if betas is None:
             return _drift_fallback(y, horizon=horizon)
@@ -153,12 +156,40 @@ class _MinnesotaBVARBase(BaseModel):
 
 class BVARMinnesota8Model(_MinnesotaBVARBase):
     def __init__(self) -> None:
-        super().__init__(name="bvar_minnesota_8", max_covariates=7, lags=2, lambda_shrink=6.0)
+        super().__init__(name="bvar_minnesota_8", max_covariates=7, lags=2, lambda_shrink=6.0, own_lag1_prior_mean=1.0)
 
 
 class BVARMinnesota20Model(_MinnesotaBVARBase):
     def __init__(self) -> None:
-        super().__init__(name="bvar_minnesota_20", max_covariates=19, lags=2, lambda_shrink=7.0)
+        super().__init__(
+            name="bvar_minnesota_20",
+            max_covariates=19,
+            lags=2,
+            lambda_shrink=7.0,
+            own_lag1_prior_mean=1.0,
+        )
+
+
+class BVARMinnesotaGrowth8Model(_MinnesotaBVARBase):
+    def __init__(self) -> None:
+        super().__init__(
+            name="bvar_minnesota_growth_8",
+            max_covariates=7,
+            lags=2,
+            lambda_shrink=6.0,
+            own_lag1_prior_mean=0.0,
+        )
+
+
+class BVARMinnesotaGrowth20Model(_MinnesotaBVARBase):
+    def __init__(self) -> None:
+        super().__init__(
+            name="bvar_minnesota_growth_20",
+            max_covariates=19,
+            lags=2,
+            lambda_shrink=7.0,
+            own_lag1_prior_mean=0.0,
+        )
 
 
 def _select_covariates(available: list[str], preferred: tuple[str, ...], max_covariates: int) -> list[str]:
@@ -186,6 +217,7 @@ def _fit_minnesota_bvar(
     lambda_shrink: float,
     cross_weight: float,
     lag_decay: float,
+    own_lag1_prior_mean: float,
 ) -> np.ndarray | None:
     T, K = panel.shape
     if T <= lags:
@@ -206,9 +238,9 @@ def _fit_minnesota_bvar(
         prior_mean = np.zeros(P, dtype=float)
         prior_mean[0] = 0.0  # intercept
 
-        # own first lag centered near random-walk behavior
+        # own first lag prior mean controls level-like (1.0) vs growth-like (0.0) dynamics
         own_lag1_idx = 1 + eq
-        prior_mean[own_lag1_idx] = 1.0
+        prior_mean[own_lag1_idx] = float(own_lag1_prior_mean)
 
         w = np.zeros(P, dtype=float)
         w[0] = 0.2
