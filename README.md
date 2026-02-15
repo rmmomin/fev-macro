@@ -370,6 +370,17 @@ Default benchmark CLI settings:
 
 When requested windows are infeasible for a stage/horizon, the harness automatically reduces to the largest valid trailing window count.
 
+### TODO
+
+- Run full model list with defaults (`--horizons 1 2 3 4`, `--num_windows 100`) using processed vintage panels (`data/panels/fred_md_vintage_panel_process.parquet`, `data/panels/fred_qd_vintage_panel_process.parquet`):
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_eval.py \
+  --horizons 1 2 3 4 \
+  --num_windows 100 \
+  --qd_vintage_panel data/panels/fred_qd_vintage_panel_process.parquet
+```
+
 ### Latest benchmark snapshot (February 15, 2026)
 
 Command run:
