@@ -372,6 +372,8 @@ When requested windows are infeasible for a stage/horizon, the harness automatic
 
 ### TODO
 
+- Re-run latest-vintage forecast and comparison plots with the newest available FRED-MD/FRED-QD vintages before sharing forecast numbers.
+
 - Run full model list with defaults (`--horizons 1 2 3 4`, `--num_windows 100`) using processed vintage panels (`data/panels/fred_md_vintage_panel_process.parquet`, `data/panels/fred_qd_vintage_panel_process.parquet`):
 
 ```bash

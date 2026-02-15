@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot a column chart of 2025Q4 real GDP q/q SAAR forecasts for selected models."""
+"""Plot a column chart of 2025Q4 real GDP q/q SAAR forecasts."""
 
 from __future__ import annotations
 
@@ -10,12 +10,31 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-DEFAULT_MODELS = ["rw_drift_log", "auto_ets", "drift", "theta", "chronos2"]
+RUN_EVAL_FULL_MODELS = [
+    "naive_last",
+    "mean",
+    "drift",
+    "seasonal_naive",
+    "random_normal",
+    "random_uniform",
+    "random_permutation",
+    "random_forest",
+    "xgboost",
+    "local_trend_ssm",
+    "bvar_minnesota_8",
+    "bvar_minnesota_20",
+    "factor_pca_qd",
+    "mixed_freq_dfm_md",
+    "ensemble_avg_top3",
+    "ensemble_weighted_top5",
+    "auto_arima",
+    "chronos2",
+]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Create a column chart for selected models' 2025Q4 q/q SAAR forecasts."
+        description="Create a column chart for model q/q SAAR forecasts for a target quarter."
     )
     parser.add_argument(
         "--input_csv",
@@ -30,13 +49,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        default=DEFAULT_MODELS,
+        default=RUN_EVAL_FULL_MODELS,
         help="Model names to include in the plot.",
     )
     parser.add_argument(
         "--output_png",
-        default="results/forecast_2025Q4_qoq_saar_selected_models.png",
+        default="results/forecast_2025Q4_qoq_saar_run_eval_models.png",
         help="Output PNG path.",
+    )
+    parser.add_argument(
+        "--allow_missing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Allow missing/NaN forecast values. Missing models are plotted at 0 with 'NA' labels. "
+            "Use --no-allow-missing to fail on missing values."
+        ),
     )
     return parser.parse_args()
 
@@ -64,20 +92,25 @@ def main() -> int:
         raise ValueError("No matching rows found for requested target quarter/models.")
 
     plot_df = plot_df.set_index("model").reindex(model_order).reset_index()
-    if plot_df["g_hat_saar"].isna().any():
+    if plot_df["g_hat_saar"].isna().any() and not args.allow_missing:
         missing_models = plot_df.loc[plot_df["g_hat_saar"].isna(), "model"].tolist()
         raise ValueError(f"Missing forecast values for models: {missing_models}")
 
-    plot_df = plot_df.sort_values("g_hat_saar", ascending=True).reset_index(drop=True)
+    plot_df["is_missing"] = plot_df["g_hat_saar"].isna()
+    plot_df["g_hat_saar_plot"] = plot_df["g_hat_saar"].fillna(0.0)
+
+    plot_df = plot_df.sort_values("g_hat_saar_plot", ascending=True).reset_index(drop=True)
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    bars = ax.bar(plot_df["model"], plot_df["g_hat_saar"], color="#2f6f9f")
+    bar_colors = ["#b0b0b0" if miss else "#2f6f9f" for miss in plot_df["is_missing"]]
+    bars = ax.bar(plot_df["model"], plot_df["g_hat_saar_plot"], color=bar_colors)
 
-    for bar, val in zip(bars, plot_df["g_hat_saar"]):
+    for bar, val, is_missing in zip(bars, plot_df["g_hat_saar"], plot_df["is_missing"]):
+        label = "NA" if is_missing else f"{val:.2f}"
         ax.text(
             bar.get_x() + bar.get_width() / 2.0,
             bar.get_height() + 0.08,
-            f"{val:.2f}",
+            label,
             ha="center",
             va="bottom",
             fontsize=10,

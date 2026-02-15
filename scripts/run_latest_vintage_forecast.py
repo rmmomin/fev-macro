@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import re
+import signal
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,14 +16,15 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from fev_macro.models import available_models  # noqa: E402
+from fev_macro.models import MODEL_REGISTRY, available_models, build_models  # noqa: E402
 from fev_macro.realtime_feeds import select_covariate_columns, train_df_to_datasets  # noqa: E402
 from fev_macro.realtime_oos import (  # noqa: E402
     BUILTIN_MODELS,
+    _RealtimeModelAdapter,
     build_origin_datasets,
+    compute_vintage_asof_date,
     load_release_table,
     load_vintage_panel,
-    resolve_models,
     to_saar_growth,
 )
 
@@ -44,6 +47,42 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="",
         help="Path to FRED-QD vintage panel parquet. Defaults to data/panels/fred_qd_vintage_panel.parquet.",
+    )
+    parser.add_argument(
+        "--md_vintage_panel",
+        type=str,
+        default="",
+        help=(
+            "Optional path to FRED-MD vintage panel parquet used by MD-feature models "
+            "(random_forest, xgboost, mixed_freq_dfm_md)."
+        ),
+    )
+    parser.add_argument(
+        "--processed_qd_csv",
+        type=str,
+        default="",
+        help=(
+            "Optional processed single-vintage QD CSV (e.g., data/processed/fred_qd_2026m1_processed.csv). "
+            "When set, this overrides --vintage_panel input."
+        ),
+    )
+    parser.add_argument(
+        "--processed_md_csv",
+        type=str,
+        default="",
+        help=(
+            "Optional processed single-vintage MD CSV (e.g., data/processed/fred_md_2026m1_processed.csv). "
+            "When set, a temporary one-vintage MD panel parquet is built and injected into MD-feature models."
+        ),
+    )
+    parser.add_argument(
+        "--processed_vintage",
+        type=str,
+        default="",
+        help=(
+            "Vintage label (YYYY-MM) for processed CSV inputs. If omitted, inferred from filename; "
+            "fallback is --vintage when that is not 'latest'."
+        ),
     )
     parser.add_argument(
         "--vintage",
@@ -95,6 +134,12 @@ def parse_args() -> argparse.Namespace:
         default="results/realtime_latest_vintage_forecast.csv",
         help="Output CSV with model forecasts.",
     )
+    parser.add_argument(
+        "--per_model_timeout_sec",
+        type=int,
+        default=180,
+        help="Timeout in seconds per model prediction attempt (best effort on POSIX).",
+    )
     return parser.parse_args()
 
 
@@ -102,6 +147,158 @@ def _resolve_paths(args: argparse.Namespace) -> tuple[Path | None, Path | None]:
     release_path = Path(args.release_csv).resolve() if args.release_csv else None
     panel_path = Path(args.vintage_panel).resolve() if args.vintage_panel else None
     return release_path, panel_path
+
+
+def _infer_vintage_from_path(path: Path) -> str | None:
+    text = path.name.lower()
+    m = re.search(r"(\d{4})m(\d{1,2})", text)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}"
+    m = re.search(r"(\d{4})-(\d{2})", text)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}"
+    return None
+
+
+def _resolve_processed_vintage(args: argparse.Namespace, *paths: Path) -> str:
+    if args.processed_vintage:
+        return str(pd.Period(str(args.processed_vintage), freq="M"))
+    if str(args.vintage).lower() != "latest":
+        return str(pd.Period(str(args.vintage), freq="M"))
+    for path in paths:
+        inferred = _infer_vintage_from_path(path)
+        if inferred:
+            return inferred
+    raise ValueError(
+        "Unable to resolve processed vintage label. Provide --processed_vintage YYYY-MM "
+        "or set --vintage explicitly."
+    )
+
+
+def _load_processed_single_vintage_csv(
+    csv_path: Path,
+    vintage_id: str,
+    target_col: str | None,
+) -> pd.DataFrame:
+    raw = pd.read_csv(csv_path)
+    if "date" not in raw.columns:
+        raise ValueError(f"Processed CSV must contain 'date' column: {csv_path}")
+    if target_col and target_col not in raw.columns:
+        raise ValueError(f"Processed CSV missing target column '{target_col}': {csv_path}")
+
+    df = raw.copy()
+    df["timestamp"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.drop(columns=["date"])
+    df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
+    df.insert(0, "vintage", str(vintage_id))
+    df.insert(1, "vintage_timestamp", pd.Timestamp(pd.Period(vintage_id, freq="M").start_time))
+    df["quarter"] = pd.PeriodIndex(df["timestamp"], freq="Q-DEC")
+    df["asof_date"] = compute_vintage_asof_date(vintage_id)
+    if target_col:
+        df[target_col] = pd.to_numeric(df[target_col], errors="coerce")
+    return df
+
+
+def _load_vintage_panel_from_args(
+    args: argparse.Namespace,
+    panel_path: Path | None,
+) -> tuple[pd.DataFrame, str]:
+    if not args.processed_qd_csv:
+        panel = load_vintage_panel(path=panel_path, target_col=args.target_col)
+        vintage_id = _resolve_vintage(vintage_panel=panel, vintage_arg=str(args.vintage))
+        return panel, vintage_id
+
+    qd_csv_path = Path(args.processed_qd_csv).expanduser().resolve()
+    if not qd_csv_path.exists():
+        raise FileNotFoundError(f"Processed QD CSV not found: {qd_csv_path}")
+
+    vintage_id = _resolve_processed_vintage(args, qd_csv_path)
+    panel = _load_processed_single_vintage_csv(
+        csv_path=qd_csv_path,
+        vintage_id=vintage_id,
+        target_col=args.target_col,
+    )
+    return panel, vintage_id
+
+
+def _build_md_panel_from_processed_csv(
+    args: argparse.Namespace,
+    output_csv_path: Path,
+) -> Path | None:
+    if not args.processed_md_csv:
+        return Path(args.md_vintage_panel).expanduser().resolve() if args.md_vintage_panel else None
+
+    md_csv_path = Path(args.processed_md_csv).expanduser().resolve()
+    if not md_csv_path.exists():
+        raise FileNotFoundError(f"Processed MD CSV not found: {md_csv_path}")
+
+    vintage_id = _resolve_processed_vintage(args, md_csv_path)
+    md_df = _load_processed_single_vintage_csv(
+        csv_path=md_csv_path,
+        vintage_id=vintage_id,
+        target_col=None,
+    )
+    md_df = md_df.drop(columns=["quarter", "asof_date"], errors="ignore")
+
+    out_path = output_csv_path.parent / f"md_panel_from_processed_{vintage_id.replace('-', '')}.parquet"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    md_df.to_parquet(out_path, index=False)
+    return out_path
+
+
+def _inject_md_panel_path(model_list: list, md_panel_path: Path | None) -> None:
+    if md_panel_path is None:
+        return
+    for model in model_list:
+        realtime_model = getattr(model, "realtime_model", None)
+        if realtime_model is None:
+            continue
+        if hasattr(realtime_model, "md_panel_path"):
+            setattr(realtime_model, "md_panel_path", Path(md_panel_path))
+
+
+def _resolve_models_prefer_builtin(models: list[str]) -> list:
+    resolved: list = []
+    for model_name in models:
+        key = str(model_name).strip().lower()
+        if key in BUILTIN_MODELS:
+            resolved.append(_RealtimeModelAdapter(BUILTIN_MODELS[key]()))
+            continue
+        if key in MODEL_REGISTRY:
+            resolved.append(build_models([key], seed=0)[key])
+            continue
+        raise ValueError(f"Unknown model '{model_name}'. Available: {sorted(set(BUILTIN_MODELS) | set(MODEL_REGISTRY))}")
+    return resolved
+
+
+class _ModelTimeoutError(TimeoutError):
+    pass
+
+
+def _run_predict_with_timeout(
+    model,
+    *,
+    past_data,
+    future_data,
+    task_shim,
+    timeout_sec: int,
+):
+    # Best-effort timeout guard for long-running model calls on POSIX.
+    if timeout_sec <= 0 or not hasattr(signal, "SIGALRM"):
+        return model.predict(past_data=past_data, future_data=future_data, task=task_shim)
+
+    def _alarm_handler(signum, frame):
+        raise _ModelTimeoutError(f"Model prediction exceeded {timeout_sec} seconds")
+
+    prev_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.alarm(int(timeout_sec))
+    try:
+        return model.predict(past_data=past_data, future_data=future_data, task=task_shim)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, prev_handler)
 
 
 def _resolve_vintage(vintage_panel: pd.DataFrame, vintage_arg: str) -> str:
@@ -127,9 +324,7 @@ def main() -> int:
     release_path, panel_path = _resolve_paths(args)
 
     release_table = load_release_table(path=release_path)
-    vintage_panel = load_vintage_panel(path=panel_path, target_col=args.target_col)
-
-    vintage_id = _resolve_vintage(vintage_panel=vintage_panel, vintage_arg=str(args.vintage))
+    vintage_panel, vintage_id = _load_vintage_panel_from_args(args=args, panel_path=panel_path)
     target_q = pd.Period(str(args.target_quarter), freq="Q-DEC")
 
     vintage_slice = vintage_panel.loc[vintage_panel["vintage"].astype(str) == vintage_id].copy()
@@ -155,7 +350,13 @@ def main() -> int:
     train_df["__origin_schedule"] = "manual_latest_vintage"
     last_observed = float(ds["last_observed_level"])
 
-    model_list = resolve_models(args.models)
+    model_list = _resolve_models_prefer_builtin(list(args.models))
+    output_path = Path(args.output_csv).resolve()
+    md_panel_override = _build_md_panel_from_processed_csv(
+        args=args,
+        output_csv_path=output_path,
+    )
+    _inject_md_panel_path(model_list=model_list, md_panel_path=md_panel_override)
     run_ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     rows: list[dict[str, object]] = []
@@ -169,7 +370,13 @@ def main() -> int:
                 covariate_cols=covariate_cols,
             )
             task_shim.train_df = train_df
-            pred_ds = model.predict(past_data=past_data, future_data=future_data, task=task_shim)
+            pred_ds = _run_predict_with_timeout(
+                model,
+                past_data=past_data,
+                future_data=future_data,
+                task_shim=task_shim,
+                timeout_sec=int(args.per_model_timeout_sec),
+            )
             path = np.asarray(pred_ds["predictions"][0], dtype=float)
             if path.size != horizon:
                 raise ValueError(f"expected horizon={horizon}, got {path.size}")
@@ -205,7 +412,6 @@ def main() -> int:
             )
 
     out_df = pd.DataFrame(rows)
-    output_path = Path(args.output_csv).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     out_df.to_csv(output_path, index=False)
 
@@ -217,6 +423,12 @@ def main() -> int:
         f"vintage={vintage_id}, observed_max_quarter={observed_q}, target_quarter={target_q}, "
         f"horizon={horizon}, models={len(model_list)}, covariate_cutoff={train_df['quarter'].max()}"
     )
+    if args.processed_qd_csv:
+        print(f"Processed QD input: {Path(args.processed_qd_csv).expanduser().resolve()}")
+    if args.processed_md_csv:
+        print(f"Processed MD input: {Path(args.processed_md_csv).expanduser().resolve()}")
+    if md_panel_override is not None:
+        print(f"MD panel used by MD-feature models: {md_panel_override}")
     print(f"Wrote forecast table: {output_path} ({len(out_df)} rows)")
     if not final.empty:
         print("\nTarget-quarter forecasts:")
