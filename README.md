@@ -174,6 +174,52 @@ Outputs:
 - `data/panels/fred_md_vintage_panel.parquet`
 - `data/panels/fred_qd_vintage_panel.parquet`
 
+## Processed FRED Datasets
+
+This repository also includes scripts that apply the documented FRED-MD/FRED-QD preprocessing rules from the McCracken/Ng MATLAB code and the `fbi` R package implementation:
+
+- transform codes (`tcode` 1-7) applied column-wise
+- MD outlier rule: `abs(x - median) > 10 * IQR`
+- MD factor-style trimming: drop first 2 transformed rows (per vintage slice)
+
+### Single-vintage processing (2026m1)
+
+Run:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/process_fred_2026m1.py
+```
+
+Default inputs:
+
+- `data/historical/md/vintages_1999_2026/2026-01.csv`
+- `data/historical/qd/vintages_2018_2026/FRED-QD_2026m1.csv`
+
+Default outputs:
+
+- `data/processed/fred_md_2026m1_processed.csv`
+- `data/processed/fred_qd_2026m1_processed.csv`
+- `data/processed/fred_2026m1_processing_manifest.json`
+
+### Vintage-panel processing (by vintage date)
+
+Run:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/process_fred_vintage_panels.py
+```
+
+Default inputs:
+
+- `data/panels/fred_md_vintage_panel.parquet`
+- `data/panels/fred_qd_vintage_panel.parquet`
+
+Default outputs:
+
+- `data/panels/fred_md_vintage_panel_process.parquet`
+- `data/panels/fred_qd_vintage_panel_process.parquet`
+- `data/panels/fred_vintage_panel_process_manifest.json`
+
 ## Real-Time OOS (First-Release Scoring)
 
 This repo includes a vintage-correct rolling OOS evaluator in:

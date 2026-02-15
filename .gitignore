@@ -5,4 +5,6 @@ results/
 data/*
 !data/panels/
 !data/panels/**
+!data/panels/fred_md_vintage_panel_process.parquet
+!data/panels/fred_qd_vintage_panel_process.parquet
 *.pyc
