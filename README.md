@@ -154,6 +154,73 @@ Outputs:
 - `data/panels/fred_md_vintage_panel.parquet`
 - `data/panels/fred_qd_vintage_panel.parquet`
 
+## Real-Time OOS (First-Release Scoring)
+
+This repo includes a vintage-correct rolling OOS evaluator in:
+
+- `src/fev_macro/realtime_oos.py`
+- `scripts/run_realtime_oos.py`
+
+### Vintage-to-origin mapping
+
+- For each release-quarter `q`, origin date is:
+  - `origin_date = first_release_date(q) - 1 day`
+- Each FRED-QD vintage `YYYY-MM` is mapped to:
+  - `asof_date = last business day of YYYY-MM` (`BMonthEnd`)
+- Training vintage selection:
+  - latest vintage with `asof_date <= origin_date`
+- Leakage guard:
+  - training uses only quarters `<= q-1` at that origin
+
+### First-release target definition
+
+- Truth level for quarter `k`:
+  - `y_true_level_first(k) = first_release(k)`
+- SAAR growth truth (Mode A):
+  - `g_true(k) = 100 * ((y_true_level_first(k) / y_true_level_first(k-1))**4 - 1)`
+- Forecast SAAR growth:
+  - `g_hat(k) = 100 * ((y_hat(k) / y_hat(k-1))**4 - 1)`
+  - for `h=1`, `y_hat(k-1)` is the last observed GDPC1 in the selected origin vintage
+  - for `h>=2`, `y_hat(k-1)` is the model’s previous-step forecast
+
+### Run command
+
+Smoke run (3 models, ~10 origins):
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py --smoke_run
+```
+
+Full run:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py \
+  --models naive_last rw_drift_log ar4_growth \
+  --horizons 1 2 3 4 \
+  --output_dir results/realtime_oos
+```
+
+Monthly-origin run (every vintage month-end, scored on first/second/third releases, bucketed by months-to-first-release):
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py \
+  --origin_schedule monthly \
+  --models naive_last rw_drift_log ar4_growth \
+  --horizons 1 2 3 4 \
+  --output_dir results/realtime_oos_monthly
+```
+
+For monthly runs, metrics are computed within each `months_to_first_release_bucket` and aggregated at the `target_quarter` level first, so repeated monthly origins do not over-weight the same target quarter inside a bucket.
+
+By default, realtime OOS scoring is filtered to target quarters `>= 2018Q1` (`--min_target_quarter 2018Q1`).
+
+Outputs:
+
+- `predictions.csv`
+  - `origin_quarter, target_quarter, horizon, y_hat_level, y_true_level_first, g_hat_saar, g_true_saar, ...`
+- `metrics.csv`
+  - `model, horizon, release_stage, months_to_first_release_bucket, rmse, mae, rmse_log_level, mae_log_level, rel_rmse, sample_count`
+
 ## Running The Benchmark
 
 Setup:

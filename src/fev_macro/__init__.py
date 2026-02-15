@@ -5,4 +5,5 @@ __all__ = [
     "tasks",
     "eval",
     "report",
+    "realtime_oos",
 ]
