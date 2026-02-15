@@ -62,6 +62,7 @@ The harness is designed so models can be added modularly and compared fairly und
 | `random_uniform` | Uniform random forecast over in-sample range | Target history only |
 | `random_permutation` | Randomly permuted historical values | Target history only |
 | `auto_arima` | StatsForecast AutoARIMA | Target history only (univariate) |
+| `auto_ets` | StatsForecast AutoETS exponential smoothing | Target history only (univariate) |
 | `local_trend_ssm` | Unobserved Components local trend/cycle | Target history only (univariate) |
 | `random_forest` | AR + exogenous random forest, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel.parquet` (quarterly aggregated by vintage) |
 | `xgboost` | Gradient-boosted AR + exogenous model, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel.parquet` (quarterly aggregated by vintage) |
