@@ -1,722 +1,81 @@
 # fev-macro
 
-Reproducible macro-forecasting benchmark harness built on `fev` rolling backtests, focused on US real GDP.
+## Overview
+`fev-macro` is a reproducible US real-GDP forecasting benchmark built on `fev` rolling-window evaluation. It combines historical FRED vintage panels, release-consistent GDP truth from ALFRED, and both classical and factor-style models. The repo is organized around one authoritative pipeline for panel building, evaluation, realtime OOS scoring, and latest-vintage 2025Q4 forecasting.
+
+## What this repo does
+1. Build vintage panels for FRED-QD and FRED-MD historical vintages.
+2. Build processed panels using FRED transform codes + MD outlier/trimming semantics (code zip + fbi).
+3. Build GDP release truth table from ALFRED and compute q/q SAAR growth for first/second/third releases robustly.
+4. Run fev evaluation for both processed and unprocessed panels, with different target objectives (LL vs G), but KPI always q/q SAAR.
+5. Produce a 2025Q4 one-shot forecast using latest FRED API pulls and processed-mode top models.
 
 ## Quickstart
-
-Setup:
-
-```bash
-pip install -r requirements.txt
-make download-historical
-make panel-md panel-qd
-make panel-md-processed panel-qd-processed
-```
-
-Unprocessed LL benchmark (raw covariates + `log_level` target):
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/run_eval_unprocessed.py --num_windows 5 --horizons 1
-```
-
-Processed G benchmark (transformed covariates + `saar_growth` target):
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/run_eval_processed.py --num_windows 5 --horizons 1
-```
-
-Both scripts write comparable outputs (`summaries.*`, `leaderboard.csv`, `pairwise.csv`) plus KPI files:
-
-- `kpi_metrics.csv` (overall q/q SAAR KPI metrics)
-- `kpi_subperiod_metrics.csv` (pre-COVID, COVID, post-COVID slices)
-
-Legacy `scripts/run_eval.py` remains available as a thin wrapper.
-
-## Recommended runs
-
-```bash
-make eval-unprocessed-standard
-make eval-processed-standard
-make eval-unprocessed-smoke
-make eval-processed-smoke
-```
-
-Use `--profile full` for overnight/full benchmarks.
-
-## Why LL vs G differs by covariate mode
-
-- `run_eval_unprocessed.py`: raw FRED-QD covariates pair better with level-style dynamics, so default target is `log_level` and model defaults use trend/level-oriented baselines.
-- `run_eval_processed.py`: transformed/stationary-ish covariates pair better with direct growth forecasting, so default target is `saar_growth` and growth-prior BVAR variants are used by default.
-
-## COVID handling
-
-- Year 2020 is no longer dropped by default.
-- Optional filtering is still available via `--exclude_years ...`.
-- COVID effects are handled in reporting via `kpi_subperiod_metrics.csv` (`pre_covid`, `covid_2020Q1_2021Q1`, `post_covid`) instead of deleting observations.
-
-## Objective
-
-This repository benchmarks multiple forecasting approaches on the same task definition and backtest protocol:
-
-- Core benchmark target: realtime GDP q/q SAAR growth from release-table truth.
-- Evaluation: multi-horizon rolling windows (`h = 1, 2, 3, 4`) with comparable metrics and leaderboard tables.
-- Visualization: inspect predicted q/q SAAR growth paths directly.
-
-The harness is designed so models can be added modularly and compared fairly under identical windows, metrics, and data handling.
-
-## Task Definition
-
-- Base benchmark dataset source: `data/panels/gdpc1_releases_first_second_third.csv`.
-- Evaluation truth source (default): `data/panels/gdpc1_releases_first_second_third.csv` using realtime SAAR columns:
-  - `qoq_saar_growth_realtime_first_pct`
-  - `qoq_saar_growth_realtime_second_pct`
-  - `qoq_saar_growth_realtime_third_pct`
-- Realtime SAAR construction for each quarter/stage uses one panel snapshot from `data/panels/fred_qd_vintage_panel.parquet` (same selected vintage for numerator and denominator):
-  - `g_{q,s} = 100 * ((GDPC1_v(q,s) / GDPC1_v(q-1,s))^4 - 1)`
-  - Default vintage mapping is `--vintage_select next` (earliest panel vintage timestamp on/after release date).
-- Historical vintage source (training windows): raw monthly vintage CSVs under `data/historical/qd/`, with parquet fallback defaulting to `data/panels/fred_qd_vintage_panel_processed.parquet` (legacy `_process` filenames are still accepted as fallback).
-- Target construction:
-  - Default benchmark target uses release-table realtime SAAR truth directly (`realtime_qoq_saar`).
-  - Optional level mode uses release-stage GDP levels (`first/second/third/latest`) transformed to:
-    - `level`: `y_t`
-    - `log_level`: `log(y_t)`
-    - `saar_growth`: `100 * ((y_t / y_{t-1})**4 - 1)`
-- Covariate construction:
-  - `run_eval_unprocessed.py`: raw FRED-QD covariates (`covariate_mode=unprocessed`).
-  - `run_eval_processed.py`: transform-code covariates (`covariate_mode=processed`).
-  - `run_eval.py`: legacy univariate wrapper (covariates disabled by default).
-- Backtest engine: `fev.Task.iter_windows()` (expanding windows).
-- Default metric: `RMSE`.
-- Exclusion rule: no year is excluded by default; use `--exclude_years` for optional filtering.
-
-## Model Set And Feature Usage
-
-`scripts/run_eval.py --profile full` model list:
-
-- `naive_last`
-- `mean`
-- `ar4`
-- `drift`
-- `seasonal_naive`
-- `random_normal`
-- `random_uniform`
-- `random_permutation`
-- `random_forest`
-- `xgboost`
-- `local_trend_ssm`
-- `bvar_minnesota_8`
-- `bvar_minnesota_20`
-- `factor_pca_qd`
-- `mixed_freq_dfm_md`
-- `ensemble_avg_top3`
-- `ensemble_weighted_top5`
-- `auto_arima`
-- `nyfed_nowcast_mqdfm`
-- `ecb_nowcast_mqdfm`
-- `chronos2`
-
-### Model summary
-
-| Model | What it is | Features used |
-|---|---|---|
-| `naive_last` | Random-walk/last-observation baseline | Target history only |
-| `rw_drift_log` | Log-space random walk with constant drift, exponentiated back to levels | Target history only (requires strictly positive levels) |
-| `mean` | Historical mean baseline | Target history only |
-| `ar4` | Univariate autoregression with 4 lags (`AutoReg`) | Target history only; naive last-value fallback if data is too short or fitting fails |
-| `drift` | Linear drift from first to last point | Target history only |
-| `seasonal_naive` | Seasonal repeat (quarterly season length = 4) | Target history only |
-| `random_normal` | Gaussian random forecast from in-sample moments | Target history only |
-| `random_uniform` | Uniform random forecast over in-sample range | Target history only |
-| `random_permutation` | Randomly permuted historical values | Target history only |
-| `auto_arima` | StatsForecast AutoARIMA | Target history only (univariate) |
-| `auto_ets` | StatsForecast AutoETS exponential smoothing | Target history only (univariate) |
-| `local_trend_ssm` | Unobserved Components local trend/cycle | Target history only (univariate) |
-| `random_forest` | AR + exogenous random forest, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel_processed.parquet` (quarterly aggregated by vintage) |
-| `xgboost` | Gradient-boosted AR + exogenous model, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel_processed.parquet` (quarterly aggregated by vintage) |
-| `bvar_minnesota_8` | Minnesota-style shrinkage BVAR (~8 total vars including GDP) | Target + selected macro covariates (~7) from FRED-QD |
-| `bvar_minnesota_20` | Minnesota-style shrinkage BVAR (~20 total vars including GDP) | Target + selected macro covariates (~19) from FRED-QD |
-| `factor_pca_qd` | Quarterly PCA factor regression | Target lags + PCA factors from up to ~80 FRED-QD covariates |
-| `mixed_freq_dfm_md` | Mixed-frequency factor model using local vintage-panel covariates | Target lags + factors from latest local processed MD vintage panel (`data/panels/fred_md_vintage_panel_processed.parquet`) |
-| `nyfed_nowcast_mqdfm` | NY Fed Staff Nowcast-inspired mixed-frequency block DFM (`DynamicFactorMQ`) | Monthly/quarterly inputs from vintage panels (default unprocessed MD/QD panel paths); if coverage/fit is insufficient, degrades to naive last-value fallback |
-| `ecb_nowcast_mqdfm` | ECB nowcasting-toolbox-inspired mixed-frequency DFM variant (`DynamicFactorMQ`) | Monthly/quarterly inputs from vintage panels (default unprocessed MD/QD panel paths); if coverage/fit is insufficient, degrades to naive last-value fallback |
-| `chronos2` | Zero-shot Chronos-2 foundation model adapter | Target history + available dynamic covariates passed as context/future known covariates |
-| `ensemble_avg_top3` | Equal-weight ensemble | Drift + AutoARIMA + LocalTrendSSM predictions |
-| `ensemble_weighted_top5` | Weighted ensemble | Drift + AutoARIMA + LocalTrendSSM + FactorPCAQD + SeasonalNaive predictions |
-
-Notes:
-
-- Models that use covariates consume all available task dynamic columns unless a model-specific cap/selection is applied.
-- `rw_drift_log` and `ar4_growth` are defined in the realtime OOS module and are used by `scripts/run_realtime_oos.py` and `scripts/run_latest_vintage_forecast.py`.
-- Registered but not in the default run list: `auto_ets`, `theta`.
-
-## Nowcasting model variants (NY Fed / ECB-inspired)
-
-Nowcasting frameworks are typically mixed-frequency state-space/factor systems that operate on ragged-edge panels and release-calendar timing (what is and is not published at each nowcast update date).
-
-This repo includes **nowcasting-inspired variants** implemented inside the same benchmark harness:
-
-- `nyfed_nowcast_mqdfm`: inspired by the NY Fed Staff Nowcast FRED specification and block structure, but implemented here via `statsmodels` `DynamicFactorMQ`.
-- `ecb_nowcast_mqdfm`: inspired by the ECB nowcasting toolbox style (DFM/bridge-equation workflow mindset), but implemented here as a generic toolbox-style `DynamicFactorMQ` variant over available panel inputs.
-
-These are **approximations for benchmarking**, not reproductions of official NY Fed or ECB nowcast workflows.
-
-### Data shortcomings / why results may be less informative
-
-- NY Fed Nowcast variant limitation: the NY Fed FRED specification includes many FRED series that are not present in fixed FRED-MD/FRED-QD template panels (for example regional Fed surveys and some labor inputs such as JOLTS/ADP), so those inputs are missing unless explicitly added.
-- NY Fed Nowcast variant limitation: true nowcasting is release-calendar aware (ragged edge + publication lags), while these panels are primarily monthly snapshot vintages and do not fully encode intra-month release timing; this can reduce nowcast informational advantage.
-- ECB toolbox variant limitation: the ECB toolbox is designed around Euro Area nowcasting datasets (Eurostat/ECB SDW/national sources) with structured release calendars, which US-focused FRED-MD/FRED-QD panels do not provide.
-- ECB toolbox variant limitation: without EA-specific inputs, vintages, and release timing, this implementation should be interpreted only as an ECB-inspired DFM-style algorithmic variant, not "the ECB model."
-- Global sufficiency statement: FRED-MD/FRED-QD vintage panels are sufficient for generic factor/DFM benchmarks and nowcasting-inspired models, but not sufficient to faithfully reproduce NY Fed or ECB nowcast workflows because key series can be missing and release-calendar real-time ragged-edge structure is simplified.
-
-## Real-Time Data Policy: Training vs Testing
-
-The harness enforces a vintage-aware protocol:
-
-1. Build the canonical task frame from `gdpc1_releases_first_second_third.csv` (quarter scaffold).
-2. Set task target values from release-table realtime q/q SAAR truth.
-3. By default, build three evaluation slices (`first`, `second`, `third`) from:
-   - `qoq_saar_growth_realtime_first_pct`
-   - `qoq_saar_growth_realtime_second_pct`
-   - `qoq_saar_growth_realtime_third_pct`
-4. Optionally exclude configured years via `--exclude_years` (default keeps all years, including 2020).
-5. For each rolling window, identify the training cutoff date.
-6. Select the latest historical FRED-QD vintage file with vintage month `<=` that cutoff.
-7. Replace `past_data` (training history) with data from that selected vintage.
-8. Keep `future_data` and OOS ground truth from the release-table task dataset.
-
-This ensures models train only on information available at that historical point, while scoring uses explicit GDP release truth rather than finalized revised GDP.
-
-## FRED Transform Codes (FredMDQD.jl Port)
-
-This repo ports the transformation logic from [`enweg/FredMDQD.jl`](https://github.com/enweg/FredMDQD.jl) into `src/fev_macro/fred_transforms.py` and applies it during dataset construction:
-
-- `1`: `x`
-- `2`: `Δx`
-- `3`: `Δ²x`
-- `4`: `log(x)`
-- `5`: `Δlog(x)`
-- `6`: `Δ²log(x)`
-- `7`: `Δ(x_t / x_{t-1} - 1)`
-
-Transform-code application is controlled by covariate mode:
-
-- `covariate_mode=processed`: transform codes are applied to covariates.
-- `covariate_mode=unprocessed`: raw values are used (no transform-code application).
-
-### Strict vintage coverage
-
-- Historical quarterly vintages available: `2018-05` to `2026-01`.
-- Default benchmark request is `num_windows=100` with horizons `h=1,2,3,4`.
-- Default benchmark behavior enables earliest-vintage fallback (`--vintage_fallback_to_earliest`), and effective windows are reduced automatically per horizon when needed to keep windows feasible.
-
-Use `--no-vintage_fallback_to_earliest` to enforce strict historical-vintage coverage.
-
-## Historical Vintage Download
-
-Download and extract both FRED-MD and FRED-QD historical vintage archives:
-
-```bash
-make download-historical
-```
-
-Equivalent script:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/download_historical_vintages.py
-```
-
-Default extraction root: `data/historical/`, organized as:
-
-- `data/historical/qd/` for quarterly vintages
-- `data/historical/md/` for monthly vintages
-
-## Build Vintage Panels
-
-Build separate combined panels across all vintages (each row includes `vintage` and `timestamp`).
-
-Unprocessed panels:
-
-```bash
-make panel-md
-make panel-qd
-```
-
-Processed panels (FRED transform codes applied to covariates):
-
-```bash
-make panel-md-processed
-make panel-qd-processed
-```
-
-Equivalent CLI:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/build_md_vintage_panel.py --mode processed
-PYTHONPATH=src .venv/bin/python scripts/build_qd_vintage_panel.py --mode processed
-```
-
-Outputs:
-
-- Unprocessed:
-  - `data/panels/fred_md_vintage_panel.parquet`
-  - `data/panels/fred_qd_vintage_panel.parquet`
-- Processed:
-  - `data/panels/fred_md_vintage_panel_processed.parquet`
-  - `data/panels/fred_qd_vintage_panel_processed.parquet`
-
-Processed QD panel note: `GDPC1` remains untransformed by design; only covariates are transformed.
-
-## Build GDP Release Truth Table
-
-Build first/second/third release levels plus realtime q/q and q/q SAAR growth columns:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/build_gdp_releases.py \
-  --series GDPC1 \
-  --vintage_panel_path data/panels/fred_qd_vintage_panel.parquet \
-  --vintage_select next \
-  --validate
-```
-
-Important flags:
-
-- `--vintage_select {next,prev}`: map stage release date to panel vintage (`next` default).
-- `--validate/--no-validate`: run construction checks (default enabled).
-- `--fail_on_validate`: exit code `2` when spike flags are found.
-
-Validation checks include:
-
-- spike/scale-break flags on realtime SAAR growth (`abs(g) > 15`) for 2010+ excluding shock-quarter whitelist (`2020Q2`, `2020Q3`)
-- jump flags (`abs(g_q - g_{q-1}) > 12`) excluding transitions touching shock whitelist quarters
-- panel-vs-release level ratio mismatch flags for 2018+ (`ratio` outside `[0.98, 1.02]`)
-- missing panel coverage flags for required quarters at the selected vintage
-
-Outputs:
-
-- `data/panels/gdpc1_releases_first_second_third.csv`
-- `data/panels/gdpc1_release_validation_report.csv`
-
-`scripts/plot_gdp_release_growth.py` now prefers these realtime growth columns (when present) instead of recomputing from stitched release levels.
-
-## Fetch Latest FRED MD/QD (Month-End Indexed)
-
-Use the API fetch script to build refreshed "latest snapshot" CSVs that mirror the historical MD/QD templates:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/fetch_latest_fred_api.py --output_dir data/latest
-```
-
-Requirements:
-
-- `FRED_API_KEY` must be set (for example in `.env`; `.env` is gitignored).
-
-Outputs:
-
-- `data/latest/fred_md_latest.csv`
-- `data/latest/fred_qd_latest.csv`
-- `data/latest/fred_latest_fetch_manifest.json`
-- `data/latest/fred_latest_coverage_gaps.json`
-
-Date alignment policy:
-
-- Both output datasets are written on a month-end `sasdate` index only.
-- Monthly template variables map to each calendar month end.
-- Quarterly template variables map to quarter-end month ends (`Mar 31`, `Jun 30`, `Sep 30`, `Dec 31`).
-
-Series coverage:
-
-- The script includes direct FRED pulls plus calibrated construction for unresolved derived variables (for example spread/ratio variables).
-- Coverage summaries are reported against template availability and include period-aligned diagnostics.
-
-## Processed FRED Datasets
-
-This repository also includes scripts that apply the documented FRED-MD/FRED-QD preprocessing rules from the McCracken/Ng MATLAB code and the `fbi` R package implementation:
-
-- transform codes (`tcode` 1-7) applied column-wise
-- MD outlier rule: `abs(x - median) > 10 * IQR`
-- MD factor-style trimming: drop first 2 transformed rows (per vintage slice)
-
-### Single-vintage processing (2026m1)
-
-Run:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/process_fred_2026m1.py
-```
-
-Default inputs:
-
-- `data/historical/md/vintages_1999_2026/2026-01.csv`
-- `data/historical/qd/vintages_2018_2026/FRED-QD_2026m1.csv`
-
-Default outputs:
-
-- `data/processed/fred_md_2026m1_processed.csv`
-- `data/processed/fred_qd_2026m1_processed.csv`
-- `data/processed/fred_2026m1_processing_manifest.json`
-
-### Latest-snapshot processing (`data/latest`)
-
-Run:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/process_fred_latest.py
-```
-
-Default inputs:
-
-- `data/latest/fred_md_latest.csv`
-- `data/latest/fred_qd_latest.csv`
-
-Default outputs:
-
-- `data/processed/fred_md_latest_processed.csv`
-- `data/processed/fred_qd_latest_processed.csv`
-- `data/processed/fred_latest_processing_manifest.json`
-
-### Vintage-panel processing (by vintage date)
-
-Run:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/process_fred_vintage_panels.py
-```
-
-Default inputs:
-
-- `data/panels/fred_md_vintage_panel.parquet`
-- `data/panels/fred_qd_vintage_panel.parquet`
-
-Default outputs:
-
-- `data/panels/fred_md_vintage_panel_process.parquet`
-- `data/panels/fred_qd_vintage_panel_process.parquet`
-- `data/panels/fred_vintage_panel_process_manifest.json`
-
-## Real-Time OOS (First-Release Scoring)
-
-This repo includes a vintage-correct rolling OOS evaluator in:
-
-- `src/fev_macro/realtime_oos.py`
-- `scripts/run_realtime_oos.py`
-
-### Vintage-to-origin mapping
-
-- For each release-quarter `q`, origin date is:
-  - `origin_date = first_release_date(q) - 1 day`
-- Each FRED-QD vintage `YYYY-MM` is mapped to:
-  - `asof_date = last business day of YYYY-MM` (`BMonthEnd`)
-- Training vintage selection:
-  - latest vintage with `asof_date <= origin_date`
-- Leakage guard:
-  - training uses only quarters `<= q-1` at that origin
-  - covariates can use ragged-edge rows from the selected vintage for forecast quarters (target GDP remains unobserved and excluded from training targets)
-
-### First-release target definition
-
-- Truth level for quarter `k`:
-  - `y_true_level_first(k) = first_release(k)`
-- SAAR growth truth (Mode A):
-  - `g_true(k) = 100 * ((y_true_level_first(k) / y_true_level_first(k-1))**4 - 1)`
-- Forecast SAAR growth:
-  - `g_hat(k) = 100 * ((y_hat(k) / y_hat(k-1))**4 - 1)`
-  - for `h=1`, `y_hat(k-1)` is the last observed GDPC1 in the selected origin vintage
-  - for `h>=2`, `y_hat(k-1)` is the model’s previous-step forecast
-
-### Run command
-
-Mode defaults:
-
-- `--mode unprocessed`
-  - QD panel default: `data/panels/fred_qd_vintage_panel.parquet`
-  - MD panel default: `data/panels/fred_md_vintage_panel.parquet`
-  - baseline default: `rw_drift_log`
-  - output default: `results/realtime_oos_unprocessed`
-- `--mode processed`
-  - QD panel default: `data/panels/fred_qd_vintage_panel_processed.parquet`
-  - MD panel default: `data/panels/fred_md_vintage_panel_processed.parquet`
-  - baseline default: `naive_last_growth`
-  - output default: `results/realtime_oos_processed`
-
-Smoke run (3 models, ~10 origins):
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py --smoke_run
-```
-
-Unprocessed LL-style run:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py \
-  --mode unprocessed \
-  --horizons 1 2 3 4 \
-  --output_dir results/realtime_oos_unprocessed
-```
-
-Processed G-style run:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py \
-  --mode processed \
-  --horizons 1 2 3 4 \
-  --output_dir results/realtime_oos_processed
-```
-
-Monthly-origin run (every vintage month-end, scored on first/second/third releases, bucketed by months-to-first-release):
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py \
-  --mode unprocessed \
-  --origin_schedule monthly \
-  --horizons 1 2 3 4 \
-  --output_dir results/realtime_oos_monthly
-```
-
-For monthly runs, metrics are computed within each `months_to_first_release_bucket` and aggregated at the `target_quarter` level first, so repeated monthly origins do not over-weight the same target quarter inside a bucket.
-
-By default, realtime OOS scoring is filtered to target quarters `>= 2018Q1` (`--min_target_quarter 2018Q1`).
-
-No COVID/2020 periods are dropped by default. If you explicitly want to exclude years in mixed-frequency MD factor models, use `--exclude_years ...`.
-
-Outputs:
-
-- `predictions.csv`
-  - `origin_quarter, target_quarter, horizon, y_hat_level, y_true_level_first, g_hat_saar, g_true_saar, ...`
-- `metrics.csv`
-  - `model, horizon, release_stage, months_to_first_release_bucket, rmse, mae, rmse_log_level, mae_log_level, rel_rmse, sample_count`
-
-## Latest-Vintage One-Shot Forecast
-
-Mode defaults:
-
-- `--mode unprocessed`
-  - QD panel default: `data/panels/fred_qd_vintage_panel.parquet`
-  - MD panel default: `data/panels/fred_md_vintage_panel.parquet`
-  - output default: `results/realtime_latest_vintage_forecast_unprocessed.csv`
-- `--mode processed`
-  - QD panel default: `data/panels/fred_qd_vintage_panel_processed.parquet`
-  - MD panel default: `data/panels/fred_md_vintage_panel_processed.parquet`
-  - output default: `results/realtime_latest_vintage_forecast_processed.csv`
-
-Unprocessed LL-style latest-vintage run:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/run_latest_vintage_forecast.py \
-  --mode unprocessed \
-  --vintage 2026-01 \
-  --target_quarter 2025Q4 \
-  --output_csv results/realtime_latest_vintage_forecast_unprocessed.csv
-```
-
-Processed G-style latest-vintage run:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/run_latest_vintage_forecast.py \
-  --mode processed \
-  --vintage 2026-01 \
-  --target_quarter 2025Q4 \
-  --output_csv results/realtime_latest_vintage_forecast_processed.csv
-```
-
-Behavior:
-
-- Finds the latest observed quarter in the selected vintage.
-- Trains each model on observed target history through that quarter.
-- Uses covariate data through the requested target quarter when available in the same vintage (ragged-edge nowcast inputs; target values remain unavailable/unseen).
-- Forecasts forward to the requested target quarter.
-- In processed mode, models can train on growth targets internally but still emit level paths (`y_hat_level`) and derived SAAR outputs in the same schema.
-- Writes a CSV including level, q/q %, and SAAR forecast columns.
-
-You can also run default settings with:
-
-```bash
-make latest-forecast
-make latest-forecast-processed
-```
-
-### Using latest raw feed files (`data/latest/*.csv`)
-
-If you want to forecast from the latest raw feed files (`data/latest/fred_md_latest.csv`, `data/latest/fred_qd_latest.csv`), first build temporary one-vintage panel parquets from those CSVs and pass them to `scripts/run_latest_vintage_forecast.py`:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/run_latest_vintage_forecast.py \
-  --vintage_panel results/tmp_latest_qd_panel_for_2025Q4.parquet \
-  --md_vintage_panel results/tmp_latest_md_panel.parquet \
-  --vintage 2026-02 \
-  --target_quarter 2025Q4 \
-  --models naive_last mean drift seasonal_naive random_normal random_uniform random_permutation random_forest xgboost local_trend_ssm bvar_minnesota_8 bvar_minnesota_20 factor_pca_qd mixed_freq_dfm_md ensemble_avg_top3 ensemble_weighted_top5 auto_arima chronos2 \
-  --output_csv results/realtime_latest_data_2025Q4_full_models.csv
-```
-
-## Plot 2025Q4 Forecast Comparison
-
-Create a sorted column chart (lowest to highest) for 2025Q4 q/q SAAR forecasts.
-By default, the script now plots the full `run_eval.py` model list:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/plot_2025q4_forecast_selected_models.py \
-  --input_csv results/realtime_latest_data_2025Q4_full_models.csv \
-  --target_quarter 2025Q4 \
-  --output_png results/forecast_2025Q4_qoq_saar_latest_data_full_models.png
-```
-
-Output:
-
-- `results/forecast_2025Q4_qoq_saar_latest_data_full_models.png`
-- optional filtered view (for example, drift-and-higher): `results/forecast_2025Q4_qoq_saar_latest_data_ge_1p16.png`
-
-## Running The Benchmark
-
-Setup:
-
 ```bash
 make setup
+make download-historical
+make panel-qd panel-md
+make panel-qd-processed panel-md-processed
+make build-gdp-releases
+make eval-unprocessed-standard
+make eval-processed-standard
 ```
 
-Inspect data:
+## Modes: processed vs unprocessed
+| Mode | Covariates | Training objective | KPI for comparison |
+|---|---|---|---|
+| `unprocessed` | Raw vintage covariates | `log_level` (LL) | q/q SAAR real GDP growth vs ALFRED release truth |
+| `processed` | Transform-code + MD outlier/trimming processed covariates | `saar_growth` (G) | q/q SAAR real GDP growth vs ALFRED release truth |
 
+Details: [`docs/data_processing.md`](docs/data_processing.md)
+
+## Models included
+Core baselines and multivariate models include `naive_last`, `drift`, `auto_arima`, `local_trend_ssm`, `random_forest`, `xgboost`, `factor_pca_qd`, `mixed_freq_dfm_md`, BVAR growth variants, and nowcasting variants.
+
+Newly emphasized variants:
+- `ar4`
+- `nyfed_nowcast_mqdfm`
+- `ecb_nowcast_mqdfm`
+
+Full model catalog: [`docs/models.md`](docs/models.md)
+
+## Nowcasting model variants (NYFed/ECB-inspired)
+`nyfed_nowcast_mqdfm` and `ecb_nowcast_mqdfm` are benchmarking approximations, not reproductions of official NY Fed or ECB production nowcasts.
+
+Data limitations:
+- Some NY Fed specification series are not present in fixed FRED-MD/FRED-QD template panels.
+- Release-calendar timing is simplified relative to full publication-lag aware nowcasting systems.
+- ECB toolbox workflows target Euro Area data ecosystems, while this repo is US FRED panel based.
+
+| Model | Intent | Runtime behavior |
+|---|---|---|
+| `ar4` | Univariate AR(4) baseline | Uses `statsmodels.AutoReg`; falls back to naive last-value forecast on short history or fit failure |
+| `nyfed_nowcast_mqdfm` | NY Fed-inspired mixed-frequency block DFM | Uses `DynamicFactorMQ` when feasible; intersects required series with available panel columns; falls back safely on failure |
+| `ecb_nowcast_mqdfm` | ECB toolbox-inspired mixed-frequency DFM | Uses `DynamicFactorMQ` when feasible with available monthly signals; falls back safely on failure |
+
+## Real-time evaluation policy
+Evaluation is always scored against release-consistent q/q SAAR GDP truth from `data/panels/gdpc1_releases_first_second_third.csv`, using `qoq_saar_growth_realtime_first_pct`, `qoq_saar_growth_realtime_second_pct`, and `qoq_saar_growth_realtime_third_pct` when available. For each quarter/release stage, realtime truth is built from one as-of panel vintage to avoid revised-history leakage from mixed-vintage denominators around reindex/rebenchmark events. Protocol details: [`docs/realtime_protocol.md`](docs/realtime_protocol.md).
+
+## Latest-vintage one-shot forecast + 2025Q4 comparison
 ```bash
-make inspect-data
+make fetch-latest && make process-latest && make latest-forecast-processed
+make plot-2025q4
 ```
 
-Run default profile (`standard`):
+## Outputs + repo layout
+- `data/historical/`: downloaded FRED vintage archives and extracted CSVs
+- `data/panels/`: generated vintage panels and GDP release truth table
+- `data/latest/`, `data/processed/`: latest API pulls and processed latest snapshots
+- `results/`: evaluation outputs, leaderboards, realtime OOS metrics, and forecast plots
+- `scripts/`: core pipeline entrypoints
+- `scripts/dev/`: non-core development utilities
+- `docs/`: deeper protocol/model/data notes
 
-```bash
-make run
-```
-
-Equivalent direct command:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/run_eval.py
-```
-
-Run full overnight profile:
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/run_eval.py --profile full
-```
-
-Full profile CLI settings:
-
-- `--horizons 1 2 3 4`
-- `--num_windows 80`
-- `--metric RMSE`
-- `--target_transform saar_growth`
-- `--eval_release_metric realtime_qoq_saar`
-- `--eval_release_csv data/panels/gdpc1_releases_first_second_third.csv`
-- `--eval_release_stages first second third`
-- `--models` full 18-model default list (see section above)
-- `--qd_vintage_panel data/panels/fred_qd_vintage_panel_processed.parquet` (used as fallback if historical CSV vintages are unavailable)
-- `--vintage_fallback_to_earliest` (enabled by default; use `--no-vintage_fallback_to_earliest` for strict coverage)
-
-When requested windows are infeasible for a stage/horizon, the harness automatically reduces to the largest valid trailing window count.
-
-### TODO
-
-- Re-run latest-vintage forecast and comparison plots with the newest available FRED-MD/FRED-QD vintages before sharing forecast numbers.
-
-- Run full model list with defaults (`--horizons 1 2 3 4`, `--num_windows 100`) using processed vintage panels (`data/panels/fred_md_vintage_panel_processed.parquet`, `data/panels/fred_qd_vintage_panel_processed.parquet`):
-
-```bash
-PYTHONPATH=src .venv/bin/python scripts/run_eval.py \
-  --horizons 1 2 3 4 \
-  --num_windows 100 \
-  --qd_vintage_panel data/panels/fred_qd_vintage_panel_processed.parquet
-```
-
-### Latest benchmark snapshot (February 15, 2026)
-
-Command run:
-
-```bash
-OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src .venv/bin/python scripts/run_eval.py
-```
-
-Observed run details:
-
-- Target: `LOG_REAL_GDP` (`saar_growth`), with no default year exclusion.
-- Evaluation truth: `data/panels/gdpc1_releases_first_second_third.csv` realtime SAAR columns (`first/second/third`).
-- Built task datasets:
-  - `results/log_real_gdp_dataset_first.parquet`
-  - `results/log_real_gdp_dataset_second.parquet`
-  - `results/log_real_gdp_dataset_third.parquet`
-- Training vintage source: historical FRED-QD CSV vintages at `data/historical/qd/vintages_2018_2026` (93 monthly files from `2018-05` to `2026-01`).
-- Effective windows reduced from requested `100` to:
-  - `first`: `h=1:25`, `h=2:24`, `h=3:23`, `h=4:22`
-  - `second`: `h=1:26`, `h=2:25`, `h=3:24`, `h=4:23`
-  - `third`: `h=1:25`, `h=2:24`, `h=3:23`, `h=4:22`
-
-Top leaderboard models (`results/leaderboard.csv`):
-
-- `mean`: `win_rate=1.000000`, `skill_score=0.237981`
-- `chronos2`: `win_rate=0.941176`, `skill_score=0.159133`
-- `ensemble_weighted_top5`: `win_rate=0.784314`, `skill_score=0.062204`
-
-Direct run with explicit output folder:
-
-```bash
-OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONPATH=src .venv/bin/python scripts/run_eval.py \
-  --results_dir results/log_real_gdp_realtime_default \
-  --seed 0
-```
-
-Generate leaderboard/pairwise from existing summaries:
-
-```bash
-make report
-```
-
-Plot train history + OOS forecasts for top-5 models (q/q SAAR derived from log GDP):
-
-```bash
-make plot
-```
-
-## Compute Hotspots (Latest Snapshot)
-
-Snapshot source:
-
-- `results/summaries.csv`
-- Computed on February 15, 2026 from `inference_time_s` totals across tasks.
-
-Top total compute methods:
-
-| Model | Total inference seconds | Seconds per forecast |
-|---|---:|---:|
-| `chronos2` | 22.983 | 0.080 |
-| `ensemble_weighted_top5` | 21.318 | 0.075 |
-| `ensemble_avg_top3` | 20.735 | 0.073 |
-| `auto_arima` | 18.035 | 0.063 |
-| `random_forest` | 7.820 | 0.027 |
-| `local_trend_ssm` | 1.428 | 0.005 |
-
-Interpretation:
-
-- Foundation model inference (`chronos2`) and ensemble models are the main compute bottlenecks.
-- In this default release-CSV run, tree models are no longer the dominant cost contributors.
-
-## Output Artifacts
-
-Primary outputs in each run directory:
-
-- `summaries.jsonl`
-- `summaries.csv`
-- `leaderboard.csv`
-- `pairwise.csv`
-- optional plots and OOS forecast CSVs
-
-## Repository Structure
-
-- `src/fev_macro/data.py`: dataset loading, target construction, vintage provider
-- `src/fev_macro/tasks.py`: horizon-specific task creation
-- `src/fev_macro/eval.py`: window loop and summary generation
-- `src/fev_macro/models/`: model implementations and registry
-- `src/fev_macro/report.py`: leaderboard/pairwise generation
-- `scripts/run_eval.py`: main benchmark CLI
-- `scripts/run_realtime_oos.py`: vintage-correct realtime OOS CLI
-- `scripts/run_latest_vintage_forecast.py`: one-shot latest-vintage forecast CLI
-- `scripts/plot_top_models.py`: top-model OOS plot generation
-- `scripts/plot_2025q4_forecast_selected_models.py`: selected-model 2025Q4 forecast bar chart
-- `scripts/download_historical_vintages.py`: vintage downloader
-- `Makefile`: setup/run/report helpers
+## References
+- FRED databases historical vintages: <https://www.stlouisfed.org/research/economists/mccracken/fred-databases>
+- FRED databases code zip (transform codes + trimming/outliers): <https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/fred-databases_code.zip?sc_lang=en&hash=82A2EEE1EF3498C0820EB2212531D895>
+- fbi library: <https://github.com/cykbennie/fbi>
+- ALFRED: <https://alfred.stlouisfed.org>
+- FRED API: <https://api.stlouisfed.org/fred>
+- NY Fed nowcast inspiration: <https://github.com/FRBNY-RG/New-York-Nowcast>
+- ECB toolbox inspiration: <https://github.com/baptiste-meunier/Nowcasting_toolbox>

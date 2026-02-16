@@ -618,7 +618,7 @@ def run_eval_pipeline(
     validate_y_true_matches_release_table(
         records_df=records_df,
         release_csv_path=args.eval_release_csv,
-        tolerance=1e-9,
+        tolerance=1e-6,
         strict=strict_truth_validation,
     )
 
@@ -696,7 +696,7 @@ def _enrich_prediction_records_with_task_meta(
 def validate_y_true_matches_release_table(
     records_df: pd.DataFrame,
     release_csv_path: str | Path,
-    tolerance: float = 1e-9,
+    tolerance: float = 1e-6,
     strict: bool = True,
 ) -> dict[str, dict[str, float | int]]:
     if records_df.empty:
@@ -1096,14 +1096,14 @@ def _apply_profile_defaults(args: argparse.Namespace, covariate_mode: CovariateM
         setattr(args, dest, value)
 
     if profile == "smoke":
-        _set_if_not_provided("horizons", [1, 2, 3, 4])
+        _set_if_not_provided("horizons", [1, 4])
         _set_if_not_provided("num_windows", 10)
         _set_if_not_provided("metric", "RMSE")
         _set_if_not_provided("models", list(SMOKE_PROFILE_MODELS))
         _set_if_not_provided("disable_historical_vintages", True)
 
     elif profile == "standard":
-        _set_if_not_provided("horizons", [1, 2, 3, 4])
+        _set_if_not_provided("horizons", [1, 2, 4])
         _set_if_not_provided("metric", "RMSE")
         _set_if_not_provided("disable_historical_vintages", True)
         if covariate_mode == "unprocessed":

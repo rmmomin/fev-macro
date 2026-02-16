@@ -10,35 +10,13 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-RUN_EVAL_FULL_MODELS = [
-    "naive_last",
-    "mean",
-    "drift",
-    "seasonal_naive",
-    "random_normal",
-    "random_uniform",
-    "random_permutation",
-    "random_forest",
-    "xgboost",
-    "local_trend_ssm",
-    "bvar_minnesota_8",
-    "bvar_minnesota_20",
-    "factor_pca_qd",
-    "mixed_freq_dfm_md",
-    "ensemble_avg_top3",
-    "ensemble_weighted_top5",
-    "auto_arima",
-    "chronos2",
-]
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Create a column chart for model q/q SAAR forecasts for a target quarter."
     )
     parser.add_argument(
         "--input_csv",
-        default="results/realtime_latest_v2026m1_2025Q4_forecasts.csv",
+        default="results/realtime_latest_vintage_forecast_processed.csv",
         help="Input forecast CSV from scripts/run_latest_vintage_forecast.py",
     )
     parser.add_argument(
@@ -49,12 +27,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        default=RUN_EVAL_FULL_MODELS,
-        help="Model names to include in the plot.",
+        default=None,
+        help="Optional model names to include in the plot. Defaults to all models in the input file.",
     )
     parser.add_argument(
         "--output_png",
-        default="results/forecast_2025Q4_qoq_saar_run_eval_models.png",
+        default="results/forecast_2025Q4_qoq_saar_selected_models.png",
         help="Output PNG path.",
     )
     parser.add_argument(
@@ -94,7 +72,15 @@ def main() -> int:
     if missing:
         raise ValueError(f"Input CSV missing required columns: {missing}")
 
-    model_order = list(args.models)
+    if args.models:
+        model_order = list(args.models)
+    else:
+        model_order = (
+            df.loc[df["target_quarter"].astype(str) == str(args.target_quarter), "model"]
+            .astype(str)
+            .drop_duplicates()
+            .tolist()
+        )
     plot_df = df.loc[
         (df["target_quarter"].astype(str) == str(args.target_quarter))
         & (df["model"].astype(str).isin(model_order))

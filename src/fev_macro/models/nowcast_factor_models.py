@@ -8,7 +8,10 @@ import numpy as np
 import pandas as pd
 from datasets import Dataset
 
-from statsmodels.tsa.statespace.dynamic_factor_mq import DynamicFactorMQ
+try:  # pragma: no cover - optional dependency path
+    from statsmodels.tsa.statespace.dynamic_factor_mq import DynamicFactorMQ
+except Exception:  # pragma: no cover - handled by model-level fallback
+    DynamicFactorMQ = None
 
 from .base import (
     BaseModel,
@@ -378,6 +381,8 @@ class NYFedNowcastMQDFMModel(BaseModel):
             cutoff = pd.Timestamp(ts[-1])
 
             try:
+                if DynamicFactorMQ is None:
+                    raise RuntimeError("statsmodels DynamicFactorMQ is unavailable")
                 endog, k_endog_monthly, y_name = self._build_endog(train_ts=ts, y=y, cutoff=cutoff)
                 factors_map = self._build_factor_map(list(endog.columns))
 
@@ -505,6 +510,8 @@ class ECBNowcastMQDFMModel(BaseModel):
             cutoff = pd.Timestamp(ts[-1])
 
             try:
+                if DynamicFactorMQ is None:
+                    raise RuntimeError("statsmodels DynamicFactorMQ is unavailable")
                 if self._md.empty:
                     raise ValueError("Monthly vintage panel unavailable for ECB nowcast model.")
 

@@ -201,9 +201,9 @@ def load_release_table(
         df["g_true_saar_first"] = pd.to_numeric(df[realtime_first_col], errors="coerce")
     else:
         print(
-            "WARNING: release table is missing "
-            f"'{realtime_first_col}'. Falling back to first_release.shift(1) for g_true_saar_first, "
-            "which may be inconsistent around reindex/rebenchmark events."
+            "WARNING!!! MISSING REALTIME SAAR TRUTH COLUMN: "
+            f"'{realtime_first_col}'. Falling back to level-derived first_release growth for g_true_saar_first. "
+            "This can be inconsistent around reindex/rebenchmark events."
         )
         y = df["first_release"].astype(float)
         y_prev = y.shift(1)
@@ -2006,9 +2006,9 @@ def run_backtest(
         else:
             if realtime_col:
                 print(
-                    "WARNING: release table is missing "
-                    f"'{realtime_col}'. Falling back to level-based g_true_saar for stage='{stage}', "
-                    "which may be inconsistent around reindex/rebenchmark events."
+                    "WARNING!!! MISSING REALTIME SAAR TRUTH COLUMN: "
+                    f"'{realtime_col}'. Falling back to level-derived g_true_saar for stage='{stage}'. "
+                    "This can be inconsistent around reindex/rebenchmark events."
                 )
             stage_map = truth_maps[stage]
             truth_saar_maps[stage] = {

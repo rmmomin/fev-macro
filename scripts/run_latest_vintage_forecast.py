@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
         "--mode",
         type=str,
         choices=["unprocessed", "processed"],
-        default="unprocessed",
+        default="processed",
         help="Realtime mode. Controls default panel/model/output paths.",
     )
     parser.add_argument(

@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Download ALFRED vintage data and build first/second/third release "
-            "dataset with latest-based q/q growth columns."
+            "dataset with panel-vintage-consistent realtime q/q SAAR growth columns."
         )
     )
     parser.add_argument("--series", default="GDPC1", help="ALFRED series ID (default: GDPC1).")
@@ -114,6 +114,11 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Exit code 2 when validation finds spike flags.",
+    )
+    parser.add_argument(
+        "--validation_report_csv",
+        default=DEFAULT_VALIDATION_REPORT_PATH,
+        help="Validation report CSV path written when --validate is enabled.",
     )
     return parser.parse_args()
 
@@ -788,7 +793,7 @@ def main() -> int:
             releases_df=releases,
             panel_df=qd_panel,
             vintage_select=args.vintage_select,
-            report_path=DEFAULT_VALIDATION_REPORT_PATH,
+            report_path=args.validation_report_csv,
         )
         if args.fail_on_validate and validation_summary["spike_flags"] > 0:
             print(

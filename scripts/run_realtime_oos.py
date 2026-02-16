@@ -53,6 +53,7 @@ def _map_eval_model_to_realtime_growth(model_name: str) -> str:
     mapping = {
         "naive_last": "naive_last_growth",
         "mean": "mean_growth",
+        "ar4": "ar4_growth",
         "auto_arima": "auto_arima_growth",
         "auto_ets": "auto_ets_growth",
         "theta": "theta_growth",
@@ -61,6 +62,8 @@ def _map_eval_model_to_realtime_growth(model_name: str) -> str:
         "xgboost": "xgboost_growth",
         "factor_pca_qd": "factor_pca_qd_growth",
         "mixed_freq_dfm_md": "mixed_freq_dfm_md_growth",
+        "bvar_minnesota_8": "bvar_minnesota_growth_8",
+        "bvar_minnesota_20": "bvar_minnesota_growth_20",
         "chronos2": "chronos2_growth",
         # keep log-drift as the realtime baseline when drift appears in eval outputs
         "drift": "rw_drift_log",
@@ -153,22 +156,24 @@ def _append_leaderboard_ensembles(
 ) -> pd.DataFrame:
     if predictions.empty:
         return predictions
+    if "g_hat_saar" not in predictions.columns:
+        return predictions
 
     group_cols = [
         c
         for c in [
-            "origin_schedule",
             "origin_date",
             "origin_quarter",
+            "target_quarter",
+            "horizon",
+            "release_stage",
+            "origin_schedule",
             "origin_observed_quarter",
             "origin_vintage",
             "origin_vintage_asof_date",
             "training_min_quarter",
             "training_max_quarter",
             "covariate_cutoff_quarter",
-            "target_quarter",
-            "horizon",
-            "release_stage",
             "months_to_first_release_bucket",
         ]
         if c in predictions.columns
@@ -194,14 +199,47 @@ def _append_leaderboard_ensembles(
         if subset.empty:
             continue
 
-        mean_cols = [c for c in ["g_hat_saar", "y_hat_level", "y_hat_prev_level"] if c in subset.columns]
-        passthrough_cols = [c for c in subset.columns if c not in set(group_cols + mean_cols + ["model", "log_y_hat"])]
-
-        agg_spec: dict[str, str] = {c: "mean" for c in mean_cols}
-        agg_spec.update({c: "first" for c in passthrough_cols})
-
-        ens = subset.groupby(group_cols, dropna=False, sort=False).agg(agg_spec).reset_index()
+        ens = (
+            subset.groupby(group_cols, dropna=False, sort=False)["g_hat_saar"]
+            .mean()
+            .reset_index()
+        )
         ens["model"] = ensemble_name
+
+        passthrough_cols = [
+            c
+            for c in subset.columns
+            if c not in set(group_cols + ["model", "g_hat_saar", "y_hat_level", "y_hat_prev_level", "log_y_hat"])
+        ]
+        if passthrough_cols:
+            passthrough = (
+                subset.groupby(group_cols, dropna=False, sort=False)[passthrough_cols]
+                .first()
+                .reset_index()
+            )
+            ens = ens.merge(passthrough, on=group_cols, how="left")
+
+        # Growth-space ensembles are authoritative for realtime scoring.
+        # Level/log outputs are reconstructed only when previous level is available.
+        if "y_hat_prev_level" in subset.columns:
+            prev_levels = (
+                subset.groupby(group_cols, dropna=False, sort=False)["y_hat_prev_level"]
+                .mean()
+                .reset_index()
+            )
+            ens = ens.merge(prev_levels, on=group_cols, how="left")
+            prev = pd.to_numeric(ens["y_hat_prev_level"], errors="coerce")
+        else:
+            ens["y_hat_prev_level"] = np.nan
+            prev = pd.Series(np.nan, index=ens.index, dtype=float)
+
+        growth = pd.to_numeric(ens["g_hat_saar"], errors="coerce")
+        quarter_factor = 1.0 + growth / 100.0
+        ens["y_hat_level"] = np.where(
+            prev.notna() & np.isfinite(prev) & (prev > 0.0) & quarter_factor.notna() & np.isfinite(quarter_factor) & (quarter_factor > 0.0),
+            prev * np.power(quarter_factor, 0.25),
+            np.nan,
+        )
 
         if "y_hat_level" in ens.columns:
             y_hat = pd.to_numeric(ens["y_hat_level"], errors="coerce")
@@ -380,8 +418,6 @@ def main() -> int:
             exclude_chronos2=bool(args.exclude_chronos2_from_selection),
         )
         requested_models = list(selection_info["eligible_models_realtime"])
-        if mode == "processed" and not str(args.baseline_model).strip():
-            baseline_model = "rw_drift_log"
 
         trace_path = (
             Path(args.selection_trace_json).expanduser().resolve()
