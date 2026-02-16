@@ -555,7 +555,7 @@ PYTHONPATH=src .venv/bin/python scripts/run_eval.py --profile full
 
 Full profile CLI settings:
 
-- `--horizons 1 2 4`
+- `--horizons 1 2 3 4`
 - `--num_windows 80`
 - `--metric RMSE`
 - `--target_transform saar_growth`

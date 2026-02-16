@@ -901,14 +901,14 @@ def _apply_profile_defaults(args: argparse.Namespace, covariate_mode: CovariateM
         setattr(args, dest, value)
 
     if profile == "smoke":
-        _set_if_not_provided("horizons", [1, 4])
+        _set_if_not_provided("horizons", [1, 2, 3, 4])
         _set_if_not_provided("num_windows", 10)
         _set_if_not_provided("metric", "RMSE")
         _set_if_not_provided("models", list(SMOKE_PROFILE_MODELS))
         _set_if_not_provided("disable_historical_vintages", True)
 
     elif profile == "standard":
-        _set_if_not_provided("horizons", [1, 2, 4])
+        _set_if_not_provided("horizons", [1, 2, 3, 4])
         _set_if_not_provided("metric", "RMSE")
         _set_if_not_provided("disable_historical_vintages", True)
         if covariate_mode == "unprocessed":
@@ -921,7 +921,7 @@ def _apply_profile_defaults(args: argparse.Namespace, covariate_mode: CovariateM
             _set_if_not_provided("models", list(PROCESSED_STANDARD_MODELS))
 
     else:  # profile == "full"
-        _set_if_not_provided("horizons", [1, 2, 4])
+        _set_if_not_provided("horizons", [1, 2, 3, 4])
         _set_if_not_provided("num_windows", 80)
         _set_if_not_provided("metric", "RMSE")
         _set_if_not_provided("models", list(FULL_PROFILE_MODELS))
