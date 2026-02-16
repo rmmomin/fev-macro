@@ -1,0 +1,59 @@
+{
+  "leaderboard_csv": "/Users/rayhanmomin/code/fev-macro/results/processed_all_models_incl_xgboost_chronos2_h1_w40/leaderboard.csv",
+  "threshold": 0.2,
+  "skill_column_used": "skill_score",
+  "eligible_eval_models": [
+    "mean",
+    "random_forest",
+    "xgboost",
+    "auto_arima",
+    "theta",
+    "local_trend_ssm",
+    "auto_ets",
+    "bvar_minnesota_growth_8",
+    "bvar_minnesota_8",
+    "mixed_freq_dfm_md",
+    "ar4",
+    "chronos2",
+    "bvar_minnesota_growth_20",
+    "bvar_minnesota_20"
+  ],
+  "top3_eval_models": [
+    "mean",
+    "random_forest",
+    "xgboost"
+  ],
+  "top5_eval_models": [
+    "mean",
+    "random_forest",
+    "xgboost",
+    "auto_arima",
+    "theta"
+  ],
+  "eligible_realtime_models": [
+    "mean_growth",
+    "random_forest_growth",
+    "xgboost_growth",
+    "auto_arima_growth",
+    "theta_growth",
+    "local_trend_ssm_growth",
+    "auto_ets_growth",
+    "bvar_minnesota_growth_8",
+    "mixed_freq_dfm_md_growth",
+    "ar4_growth",
+    "chronos2_growth",
+    "bvar_minnesota_growth_20"
+  ],
+  "top3_realtime_models": [
+    "mean_growth",
+    "random_forest_growth",
+    "xgboost_growth"
+  ],
+  "top5_realtime_models": [
+    "mean_growth",
+    "random_forest_growth",
+    "xgboost_growth",
+    "auto_arima_growth",
+    "theta_growth"
+  ]
+}
