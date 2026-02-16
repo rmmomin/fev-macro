@@ -21,7 +21,7 @@ from .data import (
     export_local_dataset_parquet,
     reindex_to_regular_frequency,
 )
-from .eval import run_models_on_tasks_with_records, save_summaries
+from .eval import run_models_on_tasks_with_records, save_summaries, save_timing_report
 from .model_sets import MODELS_G_PROCESSED, MODELS_LL_UNPROCESSED, resolve_model_names
 from .models import available_models, build_models
 from .report import generate_reports, infer_metric_column
@@ -93,6 +93,15 @@ def build_eval_arg_parser(
         type=int,
         default=120,
         help="Max selected covariate columns passed to models.",
+    )
+    parser.add_argument(
+        "--fast_mode",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Speed-oriented mode: removes heavy default models (chronos2 and ensembles) "
+            "and reduces heavy model hyperparameters."
+        ),
     )
     parser.add_argument(
         "--source_series_candidates",
@@ -205,6 +214,14 @@ def run_eval_pipeline(
         covariate_mode=mode,
         model_set=_normalize_model_set(str(getattr(args, "model_set", model_set) or model_set)),
     )
+    fast_mode = bool(getattr(args, "fast_mode", False))
+    if fast_mode:
+        requested_models, dropped_models = _apply_fast_mode_model_list(requested_models)
+        if dropped_models:
+            print(f"Fast mode dropped models: {', '.join(dropped_models)}")
+        if not requested_models:
+            raise ValueError("Fast mode removed all selected models; provide at least one non-dropped model.")
+
     unknown_models = [m for m in requested_models if m not in available_models()]
     if unknown_models:
         raise ValueError(f"Unknown models: {unknown_models}. Available models: {available_models()}")
@@ -260,6 +277,8 @@ def run_eval_pipeline(
             f"{covariate_meta.get('source')} vintage={covariate_meta.get('selected_vintage')} "
             f"count={covariate_meta.get('covariate_count')}"
         )
+    if fast_mode:
+        print("Fast mode: enabled")
 
     all_tasks = []
     task_provider_by_name: dict[str, HistoricalQuarterlyVintageProvider] = {}
@@ -439,6 +458,8 @@ def run_eval_pipeline(
             return provider.adapt_past_data(past_data=past_data, task=task)
 
     models = build_models(model_names=requested_models, seed=int(args.seed))
+    if fast_mode:
+        _apply_fast_mode_hyperparameters(models=models)
     summaries, prediction_records = run_models_on_tasks_with_records(
         tasks=all_tasks,
         models=models,
@@ -449,6 +470,8 @@ def run_eval_pipeline(
     summaries_jsonl = results_dir / "summaries.jsonl"
     summaries_csv = results_dir / "summaries.csv"
     save_summaries(summaries=summaries, jsonl_path=summaries_jsonl, csv_path=summaries_csv)
+    timing_csv = results_dir / "timing.csv"
+    timing_df = save_timing_report(summaries=summaries, output_csv=timing_csv)
 
     leaderboard_df, pairwise_df = generate_reports(
         summaries=summaries,
@@ -480,11 +503,23 @@ def run_eval_pipeline(
 
     print(f"Wrote summaries: {summaries_jsonl}")
     print(f"Wrote summaries CSV: {summaries_csv}")
+    print(f"Wrote timing report: {timing_csv}")
     print(f"Wrote leaderboard: {results_dir / 'leaderboard.csv'}")
     print(f"Wrote pairwise: {results_dir / 'pairwise.csv'}")
     print(f"Wrote prediction records: {predictions_csv}")
     print(f"Wrote KPI metrics: {kpi_csv}")
     print(f"Wrote KPI subperiod metrics: {kpi_subperiod_csv}")
+
+    if not timing_df.empty:
+        slow_models = (
+            timing_df.groupby("model_name", as_index=False, dropna=False)
+            .agg(inference_time_s=("inference_time_s", "sum"))
+            .sort_values("inference_time_s", ascending=False)
+            .head(10)
+        )
+        if not slow_models.empty:
+            print("Top 10 slowest models by total inference time (seconds):")
+            print(slow_models.to_string(index=False))
 
     if not leaderboard_df.empty and metric_col in leaderboard_df.columns:
         display_cols = [
@@ -726,7 +761,30 @@ def _select_covariate_columns(frame: pd.DataFrame, target_col: str, max_covariat
         if s.notna().sum() < 8:
             continue
         candidates.append(col)
-    return candidates[: max(0, int(max_covariates))]
+    ordered = sorted(candidates, key=lambda v: str(v))
+    return ordered[: max(0, int(max_covariates))]
+
+
+def _apply_fast_mode_model_list(model_names: Sequence[str]) -> tuple[list[str], list[str]]:
+    # Keep speed-focused defaults by dropping known-heavy models.
+    drop_set = {"chronos2", "ensemble_avg_top3", "ensemble_weighted_top5"}
+    kept: list[str] = []
+    dropped: list[str] = []
+    for name in model_names:
+        if name in drop_set:
+            dropped.append(name)
+            continue
+        kept.append(name)
+    return kept, dropped
+
+
+def _apply_fast_mode_hyperparameters(models: dict[str, Any]) -> None:
+    if "random_forest" in models and hasattr(models["random_forest"], "n_estimators"):
+        models["random_forest"].n_estimators = 50
+    if "xgboost" in models and hasattr(models["xgboost"], "n_estimators"):
+        models["xgboost"].n_estimators = 100
+    if "local_trend_ssm" in models and hasattr(models["local_trend_ssm"], "maxiter"):
+        models["local_trend_ssm"].maxiter = 50
 
 
 def _parse_task_horizon(task_name: str) -> int:
