@@ -66,6 +66,17 @@ def parse_args() -> argparse.Namespace:
             "Use --no-allow-missing to fail on missing values."
         ),
     )
+    parser.add_argument(
+        "--footnote",
+        default="",
+        help="Optional footnote text rendered at the bottom of the chart.",
+    )
+    parser.add_argument(
+        "--footnote_fontsize",
+        type=float,
+        default=9.0,
+        help="Font size for the optional footnote.",
+    )
     return parser.parse_args()
 
 
@@ -121,7 +132,19 @@ def main() -> int:
     ax.axhline(0.0, color="black", linewidth=0.8, alpha=0.7)
     ax.grid(axis="y", linestyle="--", alpha=0.3)
     plt.setp(ax.get_xticklabels(), rotation=20, ha="right")
-    fig.tight_layout()
+    if str(args.footnote).strip():
+        fig.subplots_adjust(bottom=0.2)
+        fig.text(
+            0.5,
+            0.035,
+            str(args.footnote).strip(),
+            ha="center",
+            va="bottom",
+            fontsize=float(args.footnote_fontsize),
+            color="#444444",
+            wrap=True,
+        )
+    fig.tight_layout(rect=[0.0, 0.08, 1.0, 1.0])
 
     output_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_png, dpi=150)
