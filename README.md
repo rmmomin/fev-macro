@@ -330,6 +330,25 @@ Default outputs:
 - `data/processed/fred_qd_2026m1_processed.csv`
 - `data/processed/fred_2026m1_processing_manifest.json`
 
+### Latest-snapshot processing (`data/latest`)
+
+Run:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/process_fred_latest.py
+```
+
+Default inputs:
+
+- `data/latest/fred_md_latest.csv`
+- `data/latest/fred_qd_latest.csv`
+
+Default outputs:
+
+- `data/processed/fred_md_latest_processed.csv`
+- `data/processed/fred_qd_latest_processed.csv`
+- `data/processed/fred_latest_processing_manifest.json`
+
 ### Vintage-panel processing (by vintage date)
 
 Run:

@@ -49,7 +49,7 @@ def extract_fred_transform_codes(
     if date_or_key_col not in raw_df.columns:
         return {}
 
-    key = raw_df[date_or_key_col].astype(str).str.strip().str.lower()
+    key = raw_df[date_or_key_col].astype(str).str.strip().str.lower().str.rstrip(":")
     mask = key.isin({"transform", "transformation", "tcode", "tcodes"})
     if not mask.any():
         return {}

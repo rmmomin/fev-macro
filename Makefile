@@ -3,7 +3,7 @@ VENV ?= .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
 
-.PHONY: setup inspect-data run report plot download-historical panel-md panel-qd panel-md-processed panel-qd-processed panels panels-processed latest-forecast latest-forecast-processed realtime-oos-processed eval-unprocessed-standard eval-processed-standard eval-unprocessed-smoke eval-processed-smoke eval-unprocessed-full eval-processed-full
+.PHONY: setup inspect-data run report plot download-historical panel-md panel-qd panel-md-processed panel-qd-processed panels panels-processed process-fred-latest latest-forecast latest-forecast-processed realtime-oos-processed eval-unprocessed-standard eval-processed-standard eval-unprocessed-smoke eval-processed-smoke eval-unprocessed-full eval-processed-full
 
 setup:
 	$(PYTHON) -m venv $(VENV)
@@ -40,6 +40,9 @@ panel-qd-processed:
 panels: panel-md panel-qd
 
 panels-processed: panel-md-processed panel-qd-processed
+
+process-fred-latest:
+	$(PY) scripts/process_fred_latest.py
 
 latest-forecast:
 	$(PY) scripts/run_latest_vintage_forecast.py
