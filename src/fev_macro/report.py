@@ -59,6 +59,13 @@ def generate_reports(
             bootstrap_samples=bootstrap_samples,
         )
 
+    leaderboard_df = _augment_leaderboard_with_legacy_fields(
+        leaderboard_df=leaderboard_df,
+        summaries_df=summaries_df,
+        metric_col=metric_col,
+        baseline_model=baseline_model,
+    )
+
     leaderboard_path = results_dir / "leaderboard.csv"
     pairwise_path = results_dir / "pairwise.csv"
     leaderboard_df.to_csv(leaderboard_path, index=False)
@@ -123,6 +130,126 @@ def _call_fev_utility(
         df = df.reset_index()
 
     return df
+
+
+def _augment_leaderboard_with_legacy_fields(
+    leaderboard_df: pd.DataFrame,
+    summaries_df: pd.DataFrame,
+    metric_col: str,
+    baseline_model: str,
+) -> pd.DataFrame:
+    out = leaderboard_df.copy()
+    if out.empty or "model_name" not in out.columns:
+        return out
+
+    summaries_work = summaries_df.copy()
+    if "model_name" in summaries_work.columns:
+        summaries_work["model_name"] = summaries_work["model_name"].astype(str)
+    out["model_name"] = out["model_name"].astype(str)
+
+    runtime_cols: list[tuple[str, str]] = []
+    if "training_time_s" in summaries_work.columns:
+        summaries_work["training_time_s"] = pd.to_numeric(summaries_work["training_time_s"], errors="coerce")
+        runtime_cols.append(("median_training_time_s", "training_time_s"))
+    if "inference_time_s" in summaries_work.columns:
+        summaries_work["inference_time_s"] = pd.to_numeric(summaries_work["inference_time_s"], errors="coerce")
+        runtime_cols.append(("median_inference_time_s", "inference_time_s"))
+
+    computed = pd.DataFrame(index=pd.Index([], name="model_name"))
+    if runtime_cols:
+        agg_map = {alias: (src, "median") for alias, src in runtime_cols}
+        runtime_df = summaries_work.groupby("model_name", as_index=False, dropna=False).agg(**agg_map).set_index("model_name")
+        computed = runtime_df if computed.empty else computed.join(runtime_df, how="outer")
+
+    if "trained_on_this_dataset" in summaries_work.columns:
+        overlap = (
+            pd.to_numeric(summaries_work["trained_on_this_dataset"], errors="coerce")
+            .groupby(summaries_work["model_name"])
+            .mean()
+            .rename("training_corpus_overlap")
+            .to_frame()
+        )
+        computed = overlap if computed.empty else computed.join(overlap, how="outer")
+
+    if metric_col in summaries_work.columns:
+        metric_vals = pd.to_numeric(summaries_work[metric_col], errors="coerce")
+        failures = (
+            metric_vals.isna()
+            .groupby(summaries_work["model_name"])
+            .sum()
+            .astype(int)
+            .rename("num_failures")
+            .to_frame()
+        )
+        computed = failures if computed.empty else computed.join(failures, how="outer")
+
+    if not computed.empty:
+        out = out.set_index("model_name", drop=False)
+        for col in computed.columns:
+            computed_col = pd.to_numeric(computed[col], errors="coerce")
+            if col in out.columns:
+                out_col = pd.to_numeric(out[col], errors="coerce")
+                out[col] = out_col.combine_first(computed_col)
+            else:
+                out[col] = computed_col
+        out = out.reset_index(drop=True)
+
+    if "win_rate" not in out.columns:
+        win_rate = _compute_win_rate_from_summaries(summaries_df=summaries_work, metric_col=metric_col)
+        out = out.merge(win_rate, on="model_name", how="left")
+
+    if "skill_score" not in out.columns:
+        if "skill_vs_baseline" in out.columns:
+            out["skill_score"] = pd.to_numeric(out["skill_vs_baseline"], errors="coerce")
+        elif metric_col in out.columns:
+            metric_series = pd.to_numeric(out[metric_col], errors="coerce")
+            baseline_rows = out.loc[out["model_name"] == str(baseline_model)].copy()
+            baseline_value = np.nan
+            if not baseline_rows.empty and metric_col in baseline_rows.columns:
+                baseline_metric = pd.to_numeric(baseline_rows.iloc[0][metric_col], errors="coerce")
+                if np.isfinite(baseline_metric) and baseline_metric != 0:
+                    baseline_value = float(baseline_metric)
+            if np.isfinite(baseline_value):
+                out["skill_score"] = 1.0 - (metric_series / baseline_value)
+            else:
+                out["skill_score"] = np.nan
+
+    if "median_training_time_s" not in out.columns:
+        out["median_training_time_s"] = np.nan
+    if "median_inference_time_s" not in out.columns:
+        out["median_inference_time_s"] = np.nan
+    if "training_corpus_overlap" not in out.columns:
+        out["training_corpus_overlap"] = 0.0
+    if "num_failures" not in out.columns:
+        out["num_failures"] = 0
+
+    out["num_failures"] = pd.to_numeric(out["num_failures"], errors="coerce").fillna(0).astype(int)
+    out["training_corpus_overlap"] = pd.to_numeric(out["training_corpus_overlap"], errors="coerce").fillna(0.0)
+
+    legacy_cols = [
+        "model_name",
+        "win_rate",
+        "skill_score",
+        "median_training_time_s",
+        "median_inference_time_s",
+        "training_corpus_overlap",
+        "num_failures",
+    ]
+    remaining_cols = [c for c in out.columns if c not in legacy_cols]
+    ordered = out[legacy_cols + remaining_cols].copy()
+
+    if "win_rate" in ordered.columns:
+        ordered["win_rate"] = pd.to_numeric(ordered["win_rate"], errors="coerce")
+    if "skill_score" in ordered.columns:
+        ordered["skill_score"] = pd.to_numeric(ordered["skill_score"], errors="coerce")
+    if "win_rate" in ordered.columns:
+        ordered = ordered.sort_values(
+            by=["win_rate", "skill_score", "model_name"],
+            ascending=[False, False, True],
+            na_position="last",
+        ).reset_index(drop=True)
+
+    return ordered
 
 
 def _fallback_leaderboard(
@@ -199,6 +326,27 @@ def _fallback_leaderboard(
 
     leaderboard = pd.DataFrame(rows).sort_values(metric_col, ascending=True).reset_index(drop=True)
     return leaderboard
+
+
+def _compute_win_rate_from_summaries(summaries_df: pd.DataFrame, metric_col: str) -> pd.DataFrame:
+    try:
+        pivot = _pivot_metric(summaries_df=summaries_df, metric_col=metric_col)
+    except Exception:
+        return pd.DataFrame(columns=["model_name", "win_rate"])
+
+    if pivot.empty:
+        return pd.DataFrame(columns=["model_name", "win_rate"])
+
+    task_mins = pivot.min(axis=1)
+    rows: list[dict[str, Any]] = []
+    for model_name in pivot.columns:
+        series = pivot[model_name].dropna()
+        if series.empty:
+            continue
+        idx = series.index
+        wins = (pivot.loc[idx, model_name] == task_mins.loc[idx]).astype(float)
+        rows.append({"model_name": str(model_name), "win_rate": float(wins.mean())})
+    return pd.DataFrame(rows, columns=["model_name", "win_rate"])
 
 
 def _fallback_pairwise(
