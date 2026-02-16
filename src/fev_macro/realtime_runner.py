@@ -54,6 +54,7 @@ DEFAULT_MODELS_UNPROCESSED_LL: list[str] = [
 
 DEFAULT_MODELS_PROCESSED_G: list[str] = [
     "naive_last_growth",
+    "mean_growth",
     "ar4_growth",
     "auto_arima_growth",
     "auto_ets_growth",

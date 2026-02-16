@@ -931,6 +931,18 @@ class MeanLevelModel(RealtimeModel):
         return np.repeat(float(np.mean(y)), horizon)
 
 
+class MeanGrowthModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="mean_growth")
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        g_hist, _, last_level = _growth_training_history(train_df=train_df, target_col=target_col)
+        if g_hist.size == 0:
+            return np.repeat(last_level, horizon)
+        g_hat = np.repeat(float(np.mean(g_hist)), horizon).astype(float)
+        return levels_from_saar_growth(last_level=last_level, g_hat=g_hat)
+
+
 class DriftLevelModel(RealtimeModel):
     def __init__(self) -> None:
         super().__init__(name="drift")
@@ -1701,7 +1713,9 @@ class EnsembleWeightedTop5UnprocessedLLRealtimeModel(EnsembleWeightedTop5Realtim
 class EnsembleAvgTop3ProcessedGRealtimeModel(RealtimeModel):
     def __init__(self) -> None:
         super().__init__(name="ensemble_avg_top3_processed_g")
-        self.members = [AutoARIMAGrowthModel(), LocalTrendSSMGrowthModel(), BVARMinnesotaGrowth8RealtimeModel()]
+        # Top-3 by processed leaderboard skill_score (2026-02-16):
+        # local_trend_ssm, mean, random_forest
+        self.members = [LocalTrendSSMGrowthModel(), MeanGrowthModel(), RandomForestGrowthModel()]
 
     def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
         preds = [m.forecast_levels(train_df=train_df, horizon=horizon, target_col=target_col) for m in self.members]
@@ -1712,14 +1726,17 @@ class EnsembleAvgTop3ProcessedGRealtimeModel(RealtimeModel):
 class EnsembleWeightedTop5ProcessedGRealtimeModel(RealtimeModel):
     def __init__(self) -> None:
         super().__init__(name="ensemble_weighted_top5_processed_g")
+        # Top-5 by processed leaderboard skill_score (2026-02-16):
+        # local_trend_ssm, mean, random_forest, auto_arima, bvar_minnesota_8
         self.members = [
-            AutoARIMAGrowthModel(),
-            ThetaGrowthModel(),
             LocalTrendSSMGrowthModel(),
-            FactorPCAQDGrowthRealtimeModel(),
+            MeanGrowthModel(),
+            RandomForestGrowthModel(),
+            AutoARIMAGrowthModel(),
             BVARMinnesotaGrowth8RealtimeModel(),
         ]
-        self.weights = np.asarray([0.26, 0.22, 0.20, 0.17, 0.15], dtype=float)
+        # Weights are normalized leaderboard skill scores for the top-5 models.
+        self.weights = np.asarray([0.209889, 0.206669, 0.197563, 0.196933, 0.188945], dtype=float)
         self.weights = self.weights / self.weights.sum()
 
     def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
@@ -1730,6 +1747,7 @@ class EnsembleWeightedTop5ProcessedGRealtimeModel(RealtimeModel):
 
 BUILTIN_MODELS: dict[str, type[RealtimeModel]] = {
     "mean": MeanLevelModel,
+    "mean_growth": MeanGrowthModel,
     "drift": DriftLevelModel,
     "seasonal_naive": SeasonalNaiveLevelModel,
     "naive_last": NaiveLastModel,
