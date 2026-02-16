@@ -42,7 +42,7 @@ def parse_args():
         default_model_set="auto",
         default_models=LEGACY_RUN_EVAL_MODELS,
         default_task_prefix="log_real_gdp",
-        default_qd_vintage_panel="data/panels/fred_qd_vintage_panel_process.parquet",
+        default_qd_vintage_panel="data/panels/fred_qd_vintage_panel_processed.parquet",
     )
 
     # Preserve historical defaults for run_eval.py while delegating to shared runner.

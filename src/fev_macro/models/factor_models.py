@@ -175,7 +175,7 @@ class MixedFrequencyDFMModel(BaseModel):
 
     def __init__(
         self,
-        md_dataset_path: str = "data/panels/fred_md_vintage_panel_process.parquet",
+        md_dataset_path: str = "data/panels/fred_md_vintage_panel_processed.parquet",
         md_config: str = "local_qd_panel",
         max_monthly_covariates: int = 100,
         n_factors: int = 6,
@@ -327,6 +327,10 @@ def _load_fred_md_quarter_panel(
 ) -> np.ndarray:
     _ = config
     panel_path = Path(dataset_path).expanduser().resolve()
+    if not panel_path.exists() and panel_path.name.endswith("_processed.parquet"):
+        legacy_path = panel_path.with_name(panel_path.name.replace("_processed.parquet", "_process.parquet"))
+        if legacy_path.exists():
+            panel_path = legacy_path
     if not panel_path.exists():
         raise FileNotFoundError(
             f"Local vintage panel not found for mixed_freq_dfm_md: {panel_path}. "

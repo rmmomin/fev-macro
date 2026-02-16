@@ -20,6 +20,14 @@ from fev_macro.realtime_oos import (  # noqa: E402
     run_backtest,
 )
 from fev_macro.models import available_models  # noqa: E402
+from fev_macro.realtime_runner import (  # noqa: E402
+    normalize_mode,
+    resolve_baseline_model,
+    resolve_md_panel_path,
+    resolve_models as resolve_mode_models,
+    resolve_oos_output_dir,
+    resolve_qd_panel_path,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,13 +47,26 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["unprocessed", "processed"],
+        default="unprocessed",
+        help="Realtime mode. Controls default panel/model/output paths.",
+    )
+    parser.add_argument(
         "--vintage_panel",
         type=str,
         default="",
         help=(
             "Path to FRED-QD vintage panel parquet. "
-            "If omitted, tries data/fred_qd_vintage_panel.parquet then data/panels/..."
+            "Defaults by --mode when omitted."
         ),
+    )
+    parser.add_argument(
+        "--md_vintage_panel",
+        type=str,
+        default="",
+        help="Path to FRED-MD vintage panel parquet used by MD-feature realtime models. Defaults by --mode.",
     )
     parser.add_argument(
         "--models",
@@ -65,8 +86,8 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--target_col", type=str, default="GDPC1")
-    parser.add_argument("--baseline_model", type=str, default="rw_drift_log")
-    parser.add_argument("--output_dir", type=str, default="results/realtime_oos")
+    parser.add_argument("--baseline_model", type=str, default="")
+    parser.add_argument("--output_dir", type=str, default="")
     parser.add_argument("--origin_schedule", type=str, default="quarterly", choices=["quarterly", "monthly"])
     parser.add_argument(
         "--group_by_months_to_first_release_bucket",
@@ -83,6 +104,13 @@ def parse_args() -> argparse.Namespace:
         help="Minimum target quarter included in scoring (default: 2018Q1).",
     )
     parser.add_argument("--min_train_observations", type=int, default=24)
+    parser.add_argument(
+        "--exclude_years",
+        type=int,
+        nargs="*",
+        default=[],
+        help="Optional calendar years to exclude inside mixed-frequency MD factor models (default: none).",
+    )
     parser.add_argument("--min_first_release_lag_days", type=int, default=60)
     parser.add_argument("--max_first_release_lag_days", type=int, default=200)
     parser.add_argument(
@@ -95,8 +123,10 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    mode = normalize_mode(args.mode)
 
-    requested_models = list(args.models) if args.models else ["naive_last", "rw_drift_log", "ar4_growth"]
+    requested_models = resolve_mode_models(mode=mode, requested_models=args.models)
+    baseline_model = resolve_baseline_model(mode=mode, explicit_baseline=args.baseline_model or None)
 
     if args.smoke_run:
         if args.models is None:
@@ -106,11 +136,12 @@ def main() -> int:
         if args.origin_schedule == "monthly" and args.horizons == [1, 2, 3, 4]:
             args.horizons = [1, 2, 3, 4]
 
-    output_dir = Path(args.output_dir).resolve()
+    output_dir = resolve_oos_output_dir(mode=mode, explicit_dir=args.output_dir or None)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     release_path = Path(args.release_csv).resolve() if args.release_csv else None
-    panel_path = Path(args.vintage_panel).resolve() if args.vintage_panel else None
+    panel_path = resolve_qd_panel_path(mode=mode, explicit_path=args.vintage_panel or None)
+    md_panel_path = resolve_md_panel_path(mode=mode, explicit_path=args.md_vintage_panel or None)
 
     release_table = load_release_table(
         path=release_path,
@@ -128,9 +159,10 @@ def main() -> int:
     )
     print(
         "Run config: "
-        f"models={requested_models}, horizons={args.horizons}, "
+        f"mode={mode}, models={requested_models}, baseline_model={baseline_model}, horizons={args.horizons}, "
         f"origin_schedule={args.origin_schedule}, max_origins={args.max_origins}, "
-        f"score_releases={args.score_releases}, min_target_quarter={args.min_target_quarter}"
+        f"score_releases={args.score_releases}, min_target_quarter={args.min_target_quarter}, "
+        f"md_vintage_panel={md_panel_path}, exclude_years={sorted({int(y) for y in args.exclude_years})}"
     )
 
     predictions = run_backtest(
@@ -146,12 +178,14 @@ def main() -> int:
         origin_schedule=args.origin_schedule,
         release_stages=args.score_releases,
         min_target_quarter=args.min_target_quarter,
+        md_panel_path=md_panel_path,
+        mixed_freq_excluded_years=args.exclude_years,
     )
 
     group_by_bucket = args.group_by_months_to_first_release_bucket or args.origin_schedule == "monthly"
     metrics = compute_metrics(
         predictions=predictions,
-        baseline_model=args.baseline_model,
+        baseline_model=baseline_model,
         group_by_bucket=group_by_bucket,
     )
 

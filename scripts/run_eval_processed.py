@@ -23,7 +23,7 @@ def parse_args():
         default_model_set="auto",
         default_models=None,
         default_task_prefix="gdp_saar",
-        default_qd_vintage_panel="data/panels/fred_qd_vintage_panel_process.parquet",
+        default_qd_vintage_panel="data/panels/fred_qd_vintage_panel_processed.parquet",
     )
     return parser.parse_args()
 

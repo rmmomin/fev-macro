@@ -21,11 +21,19 @@ from fev_macro.realtime_feeds import select_covariate_columns, train_df_to_datas
 from fev_macro.realtime_oos import (  # noqa: E402
     BUILTIN_MODELS,
     _RealtimeModelAdapter,
+    apply_model_runtime_options,
     build_origin_datasets,
     compute_vintage_asof_date,
     load_release_table,
     load_vintage_panel,
     to_saar_growth,
+)
+from fev_macro.realtime_runner import (  # noqa: E402
+    normalize_mode,
+    resolve_latest_output_path,
+    resolve_md_panel_path,
+    resolve_models as resolve_mode_models,
+    resolve_qd_panel_path,
 )
 
 
@@ -43,10 +51,17 @@ def parse_args() -> argparse.Namespace:
         help="Optional release table path (used for compatibility with shared dataset builders).",
     )
     parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["unprocessed", "processed"],
+        default="unprocessed",
+        help="Realtime mode. Controls default panel/model/output paths.",
+    )
+    parser.add_argument(
         "--vintage_panel",
         type=str,
         default="",
-        help="Path to FRED-QD vintage panel parquet. Defaults to data/panels/fred_qd_vintage_panel.parquet.",
+        help="Path to FRED-QD vintage panel parquet. Defaults by --mode.",
     )
     parser.add_argument(
         "--md_vintage_panel",
@@ -54,7 +69,7 @@ def parse_args() -> argparse.Namespace:
         default="",
         help=(
             "Optional path to FRED-MD vintage panel parquet used by MD-feature models "
-            "(random_forest, xgboost, mixed_freq_dfm_md)."
+            "(random_forest, xgboost, mixed_freq_dfm_md). Defaults by --mode."
         ),
     )
     parser.add_argument(
@@ -105,25 +120,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        default=[
-            "rw_drift_log",
-            "ar4_growth",
-            "auto_ets",
-            "theta",
-            "drift",
-            "auto_arima",
-            "local_trend_ssm",
-            "random_forest",
-            "xgboost",
-            "chronos2",
-            "factor_pca_qd",
-            "bvar_minnesota_8",
-            "bvar_minnesota_20",
-            "mixed_freq_dfm_md",
-            "ensemble_avg_top3",
-            "ensemble_weighted_top5",
-            "naive_last",
-        ],
+        default=None,
         help=f"Model names. Available: {sorted(set(BUILTIN_MODELS) | set(available_models()))}",
     )
     parser.add_argument("--train_window", type=str, default="expanding", choices=["expanding", "rolling"])
@@ -131,8 +128,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output_csv",
         type=str,
-        default="results/realtime_latest_vintage_forecast.csv",
-        help="Output CSV with model forecasts.",
+        default="",
+        help="Output CSV with model forecasts. Defaults by --mode.",
+    )
+    parser.add_argument(
+        "--exclude_years",
+        type=int,
+        nargs="*",
+        default=[],
+        help="Optional calendar years to exclude inside mixed-frequency MD factor models (default: none).",
     )
     parser.add_argument(
         "--per_model_timeout_sec",
@@ -141,12 +145,6 @@ def parse_args() -> argparse.Namespace:
         help="Timeout in seconds per model prediction attempt (best effort on POSIX).",
     )
     return parser.parse_args()
-
-
-def _resolve_paths(args: argparse.Namespace) -> tuple[Path | None, Path | None]:
-    release_path = Path(args.release_csv).resolve() if args.release_csv else None
-    panel_path = Path(args.vintage_panel).resolve() if args.vintage_panel else None
-    return release_path, panel_path
 
 
 def _infer_vintage_from_path(path: Path) -> str | None:
@@ -225,9 +223,10 @@ def _load_vintage_panel_from_args(
 def _build_md_panel_from_processed_csv(
     args: argparse.Namespace,
     output_csv_path: Path,
+    default_md_panel_path: Path,
 ) -> Path | None:
     if not args.processed_md_csv:
-        return Path(args.md_vintage_panel).expanduser().resolve() if args.md_vintage_panel else None
+        return default_md_panel_path
 
     md_csv_path = Path(args.processed_md_csv).expanduser().resolve()
     if not md_csv_path.exists():
@@ -245,17 +244,6 @@ def _build_md_panel_from_processed_csv(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     md_df.to_parquet(out_path, index=False)
     return out_path
-
-
-def _inject_md_panel_path(model_list: list, md_panel_path: Path | None) -> None:
-    if md_panel_path is None:
-        return
-    for model in model_list:
-        realtime_model = getattr(model, "realtime_model", None)
-        if realtime_model is None:
-            continue
-        if hasattr(realtime_model, "md_panel_path"):
-            setattr(realtime_model, "md_panel_path", Path(md_panel_path))
 
 
 def _resolve_models_prefer_builtin(models: list[str]) -> list:
@@ -321,7 +309,12 @@ def _latest_observed_quarter(vintage_slice: pd.DataFrame, target_col: str) -> pd
 
 def main() -> int:
     args = parse_args()
-    release_path, panel_path = _resolve_paths(args)
+    mode = normalize_mode(args.mode)
+    release_path = Path(args.release_csv).resolve() if args.release_csv else None
+    panel_path = resolve_qd_panel_path(mode=mode, explicit_path=args.vintage_panel or None)
+    output_path = resolve_latest_output_path(mode=mode, explicit_path=args.output_csv or None)
+    md_panel_default = resolve_md_panel_path(mode=mode, explicit_path=args.md_vintage_panel or None)
+    requested_models = resolve_mode_models(mode=mode, requested_models=args.models)
 
     release_table = load_release_table(path=release_path)
     vintage_panel, vintage_id = _load_vintage_panel_from_args(args=args, panel_path=panel_path)
@@ -350,13 +343,17 @@ def main() -> int:
     train_df["__origin_schedule"] = "manual_latest_vintage"
     last_observed = float(ds["last_observed_level"])
 
-    model_list = _resolve_models_prefer_builtin(list(args.models))
-    output_path = Path(args.output_csv).resolve()
+    model_list = _resolve_models_prefer_builtin(list(requested_models))
     md_panel_override = _build_md_panel_from_processed_csv(
         args=args,
         output_csv_path=output_path,
+        default_md_panel_path=md_panel_default,
     )
-    _inject_md_panel_path(model_list=model_list, md_panel_path=md_panel_override)
+    apply_model_runtime_options(
+        model_list=model_list,
+        md_panel_path=md_panel_override,
+        mixed_freq_excluded_years=args.exclude_years,
+    )
     run_ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
     rows: list[dict[str, object]] = []
@@ -420,7 +417,7 @@ def main() -> int:
 
     print(
         "Run config: "
-        f"vintage={vintage_id}, observed_max_quarter={observed_q}, target_quarter={target_q}, "
+        f"mode={mode}, vintage={vintage_id}, observed_max_quarter={observed_q}, target_quarter={target_q}, "
         f"horizon={horizon}, models={len(model_list)}, covariate_cutoff={train_df['quarter'].max()}"
     )
     if args.processed_qd_csv:

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Callable, Literal, Sequence
+from typing import Callable, Literal, Sequence, cast
 
 import pandas as pd
 
 from .fred_transforms import apply_fred_transform_codes, extract_fred_transform_codes
+
+VintagePanelMode = Literal["unprocessed", "processed"]
+SUPPORTED_PANEL_MODES = {"unprocessed", "processed"}
 
 _MD_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^(?P<year>\d{4})-(?P<month>\d{2})\.csv$", re.IGNORECASE),
@@ -26,19 +29,47 @@ def discover_qd_vintage_files(qd_dir: str | Path) -> dict[pd.Period, Path]:
     return _discover_vintage_files(root=qd_dir, parser=_parse_qd_period)
 
 
-def build_md_vintage_panel(md_dir: str | Path) -> pd.DataFrame:
+def build_md_vintage_panel(
+    md_dir: str | Path,
+    *,
+    mode: VintagePanelMode = "unprocessed",
+    apply_fred_transforms: bool | None = None,
+    exclude_from_transforms: Sequence[str] = ("timestamp",),
+    transform_vintage_policy: Literal["per_file", "latest_file"] = "per_file",
+) -> pd.DataFrame:
     files = discover_md_vintage_files(md_dir)
-    return build_panel_from_files(files)
+    normalized_mode = _normalize_mode(mode)
+    do_transforms = _resolve_apply_transforms(normalized_mode, apply_fred_transforms)
+    return build_panel_from_files(
+        files,
+        apply_transforms=do_transforms,
+        exclude_from_transforms=exclude_from_transforms,
+        transform_vintage_policy=transform_vintage_policy,
+    )
 
 
-def build_qd_vintage_panel(qd_dir: str | Path) -> pd.DataFrame:
+def build_qd_vintage_panel(
+    qd_dir: str | Path,
+    *,
+    mode: VintagePanelMode = "unprocessed",
+    apply_fred_transforms: bool | None = None,
+    exclude_from_transforms: Sequence[str] = ("timestamp", "GDPC1"),
+    transform_vintage_policy: Literal["per_file", "latest_file"] = "per_file",
+) -> pd.DataFrame:
     files = discover_qd_vintage_files(qd_dir)
-    return build_panel_from_files(files, exclude_from_transforms=("timestamp", "GDPC1"))
+    normalized_mode = _normalize_mode(mode)
+    do_transforms = _resolve_apply_transforms(normalized_mode, apply_fred_transforms)
+    return build_panel_from_files(
+        files,
+        apply_transforms=do_transforms,
+        exclude_from_transforms=exclude_from_transforms,
+        transform_vintage_policy=transform_vintage_policy,
+    )
 
 
 def build_panel_from_files(
     vintage_files: dict[pd.Period, Path],
-    apply_transforms: bool = True,
+    apply_transforms: bool = False,
     exclude_from_transforms: Sequence[str] = ("timestamp",),
     transform_vintage_policy: Literal["per_file", "latest_file"] = "per_file",
 ) -> pd.DataFrame:
@@ -72,6 +103,19 @@ def build_panel_from_files(
     panel = pd.concat(frames, axis=0, ignore_index=True, sort=False)
     panel = panel.sort_values(["vintage", "timestamp"]).reset_index(drop=True)
     return panel
+
+
+def _normalize_mode(mode: str) -> VintagePanelMode:
+    value = str(mode).strip().lower()
+    if value not in SUPPORTED_PANEL_MODES:
+        raise ValueError(f"Unsupported mode={mode!r}. Supported={sorted(SUPPORTED_PANEL_MODES)}")
+    return cast(VintagePanelMode, value)
+
+
+def _resolve_apply_transforms(mode: VintagePanelMode, apply_fred_transforms: bool | None) -> bool:
+    if apply_fred_transforms is None:
+        return mode == "processed"
+    return bool(apply_fred_transforms)
 
 
 def write_panel(df: pd.DataFrame, output_path: str | Path) -> Path:

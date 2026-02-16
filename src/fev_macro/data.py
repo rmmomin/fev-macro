@@ -38,6 +38,31 @@ RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN: dict[str, str] = {
 }
 
 
+def _default_qd_panel_candidates(covariate_mode: Literal["unprocessed", "processed"]) -> tuple[Path, ...]:
+    if covariate_mode == "processed":
+        return (
+            Path("data/panels/fred_qd_vintage_panel_processed.parquet"),
+            Path("data/panels/fred_qd_vintage_panel_process.parquet"),
+        )
+    return (Path("data/panels/fred_qd_vintage_panel.parquet"),)
+
+
+def _resolve_panel_candidate(
+    explicit_path: str | Path | None,
+    *,
+    covariate_mode: Literal["unprocessed", "processed"],
+) -> Path:
+    if explicit_path is not None:
+        return Path(explicit_path).expanduser().resolve()
+
+    candidates = _default_qd_panel_candidates(covariate_mode=covariate_mode)
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if resolved.exists():
+            return resolved
+    return candidates[0].expanduser().resolve()
+
+
 def discover_historical_qd_vintage_files(historical_qd_dir: str | Path) -> dict[pd.Period, Path]:
     """Discover historical FRED-QD vintage files keyed by monthly vintage period."""
     preferred = Path(historical_qd_dir).expanduser()
@@ -165,12 +190,10 @@ def build_covariate_df(
         )
     except FileNotFoundError:
         source_kind = "panel_parquet"
-        panel_candidate = (
-            Path(qd_panel_path)
-            if qd_panel_path is not None
-            else Path("data/panels/fred_qd_vintage_panel_process.parquet")
+        panel_candidate = _resolve_panel_candidate(
+            qd_panel_path,
+            covariate_mode=mode,
         )
-        panel_candidate = panel_candidate.expanduser().resolve()
         if not panel_candidate.exists():
             raise FileNotFoundError(
                 f"No historical FRED-QD CSVs and no QD panel parquet at {panel_candidate}"
@@ -371,12 +394,10 @@ class HistoricalQuarterlyVintageProvider:
             self.historical_qd_dir = next(iter(self.vintage_files.values())).parent.resolve()
             self.vintage_periods = sorted(self.vintage_files.keys())
         except FileNotFoundError:
-            panel_candidate = (
-                Path(qd_panel_path)
-                if qd_panel_path is not None
-                else Path("data/panels/fred_qd_vintage_panel_process.parquet")
+            panel_candidate = _resolve_panel_candidate(
+                qd_panel_path,
+                covariate_mode=self.covariate_mode,
             )
-            panel_candidate = panel_candidate.expanduser().resolve()
             if not panel_candidate.exists():
                 raise
             panel_df = pd.read_parquet(panel_candidate)

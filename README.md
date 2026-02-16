@@ -10,6 +10,7 @@ Setup:
 pip install -r requirements.txt
 make download-historical
 make panel-md panel-qd
+make panel-md-processed panel-qd-processed
 ```
 
 Unprocessed LL benchmark (raw covariates + `log_level` target):
@@ -62,7 +63,7 @@ The harness is designed so models can be added modularly and compared fairly und
 - Realtime SAAR construction for each quarter/stage uses one panel snapshot from `data/panels/fred_qd_vintage_panel.parquet` (same selected vintage for numerator and denominator):
   - `g_{q,s} = 100 * ((GDPC1_v(q,s) / GDPC1_v(q-1,s))^4 - 1)`
   - Default vintage mapping is `--vintage_select next` (earliest panel vintage timestamp on/after release date).
-- Historical vintage source (training windows): raw monthly vintage CSVs under `data/historical/qd/`, with parquet fallback defaulting to `data/panels/fred_qd_vintage_panel_process.parquet`.
+- Historical vintage source (training windows): raw monthly vintage CSVs under `data/historical/qd/`, with parquet fallback defaulting to `data/panels/fred_qd_vintage_panel_processed.parquet` (legacy `_process` filenames are still accepted as fallback).
 - Target construction:
   - Default benchmark target uses release-table realtime SAAR truth directly (`realtime_qoq_saar`).
   - Optional level mode uses release-stage GDP levels (`first/second/third/latest`) transformed to:
@@ -115,12 +116,12 @@ The harness is designed so models can be added modularly and compared fairly und
 | `auto_arima` | StatsForecast AutoARIMA | Target history only (univariate) |
 | `auto_ets` | StatsForecast AutoETS exponential smoothing | Target history only (univariate) |
 | `local_trend_ssm` | Unobserved Components local trend/cycle | Target history only (univariate) |
-| `random_forest` | AR + exogenous random forest, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel_process.parquet` (quarterly aggregated by vintage) |
-| `xgboost` | Gradient-boosted AR + exogenous model, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel_process.parquet` (quarterly aggregated by vintage) |
+| `random_forest` | AR + exogenous random forest, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel_processed.parquet` (quarterly aggregated by vintage) |
+| `xgboost` | Gradient-boosted AR + exogenous model, recursive multi-step | Target lags + ragged-edge FRED-QD covariates + monthly FRED-MD vintage features from `data/panels/fred_md_vintage_panel_processed.parquet` (quarterly aggregated by vintage) |
 | `bvar_minnesota_8` | Minnesota-style shrinkage BVAR (~8 total vars including GDP) | Target + selected macro covariates (~7) from FRED-QD |
 | `bvar_minnesota_20` | Minnesota-style shrinkage BVAR (~20 total vars including GDP) | Target + selected macro covariates (~19) from FRED-QD |
 | `factor_pca_qd` | Quarterly PCA factor regression | Target lags + PCA factors from up to ~80 FRED-QD covariates |
-| `mixed_freq_dfm_md` | Mixed-frequency factor model using local vintage-panel covariates | Target lags + factors from latest local processed MD vintage panel (`data/panels/fred_md_vintage_panel_process.parquet`) |
+| `mixed_freq_dfm_md` | Mixed-frequency factor model using local vintage-panel covariates | Target lags + factors from latest local processed MD vintage panel (`data/panels/fred_md_vintage_panel_processed.parquet`) |
 | `chronos2` | Zero-shot Chronos-2 foundation model adapter | Target history + available dynamic covariates passed as context/future known covariates |
 | `ensemble_avg_top3` | Equal-weight ensemble | Drift + AutoARIMA + LocalTrendSSM predictions |
 | `ensemble_weighted_top5` | Weighted ensemble | Drift + AutoARIMA + LocalTrendSSM + FactorPCAQD + SeasonalNaive predictions |
@@ -195,17 +196,39 @@ Default extraction root: `data/historical/`, organized as:
 
 ## Build Vintage Panels
 
-Build separate combined panels across all vintages (each row includes `vintage` and `timestamp`):
+Build separate combined panels across all vintages (each row includes `vintage` and `timestamp`).
+
+Unprocessed panels:
 
 ```bash
 make panel-md
 make panel-qd
 ```
 
+Processed panels (FRED transform codes applied to covariates):
+
+```bash
+make panel-md-processed
+make panel-qd-processed
+```
+
+Equivalent CLI:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/build_md_vintage_panel.py --mode processed
+PYTHONPATH=src .venv/bin/python scripts/build_qd_vintage_panel.py --mode processed
+```
+
 Outputs:
 
-- `data/panels/fred_md_vintage_panel.parquet`
-- `data/panels/fred_qd_vintage_panel.parquet`
+- Unprocessed:
+  - `data/panels/fred_md_vintage_panel.parquet`
+  - `data/panels/fred_qd_vintage_panel.parquet`
+- Processed:
+  - `data/panels/fred_md_vintage_panel_processed.parquet`
+  - `data/panels/fred_qd_vintage_panel_processed.parquet`
+
+Processed QD panel note: `GDPC1` remains untransformed by design; only covariates are transformed.
 
 ## Build GDP Release Truth Table
 
@@ -347,27 +370,49 @@ This repo includes a vintage-correct rolling OOS evaluator in:
 
 ### Run command
 
+Mode defaults:
+
+- `--mode unprocessed`
+  - QD panel default: `data/panels/fred_qd_vintage_panel.parquet`
+  - MD panel default: `data/panels/fred_md_vintage_panel.parquet`
+  - baseline default: `rw_drift_log`
+  - output default: `results/realtime_oos_unprocessed`
+- `--mode processed`
+  - QD panel default: `data/panels/fred_qd_vintage_panel_processed.parquet`
+  - MD panel default: `data/panels/fred_md_vintage_panel_processed.parquet`
+  - baseline default: `naive_last_growth`
+  - output default: `results/realtime_oos_processed`
+
 Smoke run (3 models, ~10 origins):
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py --smoke_run
 ```
 
-Full run:
+Unprocessed LL-style run:
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py \
-  --models naive_last rw_drift_log ar4_growth \
+  --mode unprocessed \
   --horizons 1 2 3 4 \
-  --output_dir results/realtime_oos
+  --output_dir results/realtime_oos_unprocessed
+```
+
+Processed G-style run:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py \
+  --mode processed \
+  --horizons 1 2 3 4 \
+  --output_dir results/realtime_oos_processed
 ```
 
 Monthly-origin run (every vintage month-end, scored on first/second/third releases, bucketed by months-to-first-release):
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py \
+  --mode unprocessed \
   --origin_schedule monthly \
-  --models naive_last rw_drift_log ar4_growth \
   --horizons 1 2 3 4 \
   --output_dir results/realtime_oos_monthly
 ```
@@ -375,6 +420,8 @@ PYTHONPATH=src .venv/bin/python scripts/run_realtime_oos.py \
 For monthly runs, metrics are computed within each `months_to_first_release_bucket` and aggregated at the `target_quarter` level first, so repeated monthly origins do not over-weight the same target quarter inside a bucket.
 
 By default, realtime OOS scoring is filtered to target quarters `>= 2018Q1` (`--min_target_quarter 2018Q1`).
+
+No COVID/2020 periods are dropped by default. If you explicitly want to exclude years in mixed-frequency MD factor models, use `--exclude_years ...`.
 
 Outputs:
 
@@ -385,13 +432,35 @@ Outputs:
 
 ## Latest-Vintage One-Shot Forecast
 
-For a single nowcast/forecast using all information in one chosen vintage (for example `2026-01`) and a requested target quarter:
+Mode defaults:
+
+- `--mode unprocessed`
+  - QD panel default: `data/panels/fred_qd_vintage_panel.parquet`
+  - MD panel default: `data/panels/fred_md_vintage_panel.parquet`
+  - output default: `results/realtime_latest_vintage_forecast_unprocessed.csv`
+- `--mode processed`
+  - QD panel default: `data/panels/fred_qd_vintage_panel_processed.parquet`
+  - MD panel default: `data/panels/fred_md_vintage_panel_processed.parquet`
+  - output default: `results/realtime_latest_vintage_forecast_processed.csv`
+
+Unprocessed LL-style latest-vintage run:
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/run_latest_vintage_forecast.py \
+  --mode unprocessed \
   --vintage 2026-01 \
   --target_quarter 2025Q4 \
-  --output_csv results/realtime_latest_v2026m1_2025Q4_forecasts.csv
+  --output_csv results/realtime_latest_vintage_forecast_unprocessed.csv
+```
+
+Processed G-style latest-vintage run:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_latest_vintage_forecast.py \
+  --mode processed \
+  --vintage 2026-01 \
+  --target_quarter 2025Q4 \
+  --output_csv results/realtime_latest_vintage_forecast_processed.csv
 ```
 
 Behavior:
@@ -400,12 +469,14 @@ Behavior:
 - Trains each model on observed target history through that quarter.
 - Uses covariate data through the requested target quarter when available in the same vintage (ragged-edge nowcast inputs; target values remain unavailable/unseen).
 - Forecasts forward to the requested target quarter.
+- In processed mode, models can train on growth targets internally but still emit level paths (`y_hat_level`) and derived SAAR outputs in the same schema.
 - Writes a CSV including level, q/q %, and SAAR forecast columns.
 
 You can also run default settings with:
 
 ```bash
 make latest-forecast
+make latest-forecast-processed
 ```
 
 ### Using latest raw feed files (`data/latest/*.csv`)
@@ -475,7 +546,7 @@ Default benchmark CLI settings:
 - `--eval_release_csv data/panels/gdpc1_releases_first_second_third.csv`
 - `--eval_release_stages first second third`
 - `--models` full 18-model default list (see section above)
-- `--qd_vintage_panel data/panels/fred_qd_vintage_panel_process.parquet` (used as fallback if historical CSV vintages are unavailable)
+- `--qd_vintage_panel data/panels/fred_qd_vintage_panel_processed.parquet` (used as fallback if historical CSV vintages are unavailable)
 - `--vintage_fallback_to_earliest` (enabled by default; use `--no-vintage_fallback_to_earliest` for strict coverage)
 
 When requested windows are infeasible for a stage/horizon, the harness automatically reduces to the largest valid trailing window count.
@@ -484,13 +555,13 @@ When requested windows are infeasible for a stage/horizon, the harness automatic
 
 - Re-run latest-vintage forecast and comparison plots with the newest available FRED-MD/FRED-QD vintages before sharing forecast numbers.
 
-- Run full model list with defaults (`--horizons 1 2 3 4`, `--num_windows 100`) using processed vintage panels (`data/panels/fred_md_vintage_panel_process.parquet`, `data/panels/fred_qd_vintage_panel_process.parquet`):
+- Run full model list with defaults (`--horizons 1 2 3 4`, `--num_windows 100`) using processed vintage panels (`data/panels/fred_md_vintage_panel_processed.parquet`, `data/panels/fred_qd_vintage_panel_processed.parquet`):
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/run_eval.py \
   --horizons 1 2 3 4 \
   --num_windows 100 \
-  --qd_vintage_panel data/panels/fred_qd_vintage_panel_process.parquet
+  --qd_vintage_panel data/panels/fred_qd_vintage_panel_processed.parquet
 ```
 
 ### Latest benchmark snapshot (February 15, 2026)

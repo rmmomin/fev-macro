@@ -14,7 +14,9 @@ if str(SRC) not in sys.path:
 from fev_macro.realtime_oos import (  # noqa: E402
     build_vintage_calendar,
     compute_vintage_asof_date,
+    levels_from_saar_growth,
     run_backtest,
+    saar_growth_series_from_levels,
     select_training_vintage,
     to_quarter_period,
     to_saar_growth,
@@ -29,6 +31,15 @@ def test_saar_conversion_toy_series() -> None:
     expected = 100.0 * ((current / previous) ** 4 - 1.0)
     actual = to_saar_growth(current, previous)
     assert np.isclose(actual, expected, rtol=0.0, atol=1e-12)
+
+
+def test_saar_growth_series_round_trip_to_levels() -> None:
+    levels = pd.Series([100.0, 101.5, 103.0, 104.1], dtype=float)
+    growth = saar_growth_series_from_levels(levels)
+    assert np.isnan(growth.iloc[0])
+
+    reconstructed = levels_from_saar_growth(last_level=float(levels.iloc[0]), g_hat=growth.iloc[1:].to_numpy(dtype=float))
+    assert np.allclose(reconstructed, levels.iloc[1:].to_numpy(dtype=float), rtol=0.0, atol=1e-10)
 
 
 def test_select_training_vintage_last_business_day_bounds() -> None:
@@ -206,6 +217,27 @@ def test_run_backtest_prefers_realtime_saar_truth_columns() -> None:
     finite_truth = preds["g_true_saar"].dropna().to_numpy(dtype=float)
     assert finite_truth.size > 0
     assert np.allclose(finite_truth, 9.99)
+
+
+def test_run_backtest_supports_growth_target_models() -> None:
+    release = _make_synthetic_release_table()
+    panel = _make_synthetic_vintage_panel(release)
+
+    preds = run_backtest(
+        models=["naive_last_growth"],
+        release_table=release,
+        vintage_panel=panel,
+        horizons=[1, 2],
+        target_col="GDPC1",
+        origin_schedule="quarterly",
+        max_origins=6,
+        min_train_observations=4,
+    )
+
+    assert not preds.empty
+    assert set(preds["model"].unique()) == {"naive_last_growth"}
+    assert preds["y_hat_level"].notna().any()
+    assert preds["g_hat_saar"].notna().any()
 
 
 def test_train_df_to_datasets_builds_ragged_edge_future_covariates() -> None:

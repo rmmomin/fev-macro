@@ -81,6 +81,33 @@ def to_saar_growth(current_level: float, previous_level: float) -> float:
     return float(100.0 * ((current_level / previous_level) ** 4 - 1.0))
 
 
+def saar_growth_series_from_levels(y: pd.Series) -> pd.Series:
+    values = pd.to_numeric(pd.Series(y), errors="coerce")
+    prev = values.shift(1)
+    out = pd.Series(index=values.index, dtype=float)
+    for idx, (current, previous) in enumerate(zip(values.to_numpy(dtype=float), prev.to_numpy(dtype=float), strict=False)):
+        out.iloc[idx] = to_saar_growth(current_level=current, previous_level=previous)
+    return out
+
+
+def levels_from_saar_growth(last_level: float, g_hat: np.ndarray) -> np.ndarray:
+    if not np.isfinite(last_level) or last_level <= 0:
+        raise ValueError("levels_from_saar_growth requires a positive finite last_level.")
+
+    growth = np.asarray(g_hat, dtype=float).reshape(-1)
+    out = np.full(growth.size, np.nan, dtype=float)
+    level = float(last_level)
+    for i, g in enumerate(growth):
+        if not np.isfinite(g):
+            continue
+        quarter_factor = 1.0 + float(g) / 100.0
+        if quarter_factor <= 0:
+            continue
+        level = float(level * (quarter_factor ** 0.25))
+        out[i] = level
+    return out
+
+
 def months_to_first_release(origin_date: pd.Timestamp, first_release_date: pd.Timestamp | float) -> float:
     if pd.isna(first_release_date):
         return float("nan")
@@ -331,6 +358,30 @@ def _target_array(train_df: pd.DataFrame, target_col: str) -> np.ndarray:
     return y
 
 
+def _target_series_and_last_level(train_df: pd.DataFrame, target_col: str) -> tuple[pd.Series, float]:
+    y_all = pd.to_numeric(train_df[target_col], errors="coerce")
+    observed = y_all.dropna()
+    if observed.empty:
+        raise ValueError("No target history available.")
+    return y_all, float(observed.iloc[-1])
+
+
+def _build_growth_target_frame(train_df: pd.DataFrame, target_col: str) -> tuple[pd.DataFrame, str, float]:
+    df = train_df.copy().sort_values("quarter").reset_index(drop=True)
+    y_all, last_level = _target_series_and_last_level(df, target_col)
+    growth_target_col = "__target_saar_growth"
+    df[growth_target_col] = saar_growth_series_from_levels(y_all)
+    return df, growth_target_col, last_level
+
+
+def _growth_path_from_last_growth(last_level: float, g_history: np.ndarray, horizon: int) -> np.ndarray:
+    if g_history.size == 0:
+        return np.repeat(last_level, horizon)
+    g_last = float(g_history[-1]) if np.isfinite(g_history[-1]) else 0.0
+    g_hat = np.repeat(g_last, horizon).astype(float)
+    return levels_from_saar_growth(last_level=last_level, g_hat=g_hat)
+
+
 def _recursive_log_level_regression(
     y: np.ndarray,
     horizon: int,
@@ -541,6 +592,81 @@ def _recursive_log_level_regression_with_covariates(
     return np.exp(np.asarray(preds_ly, dtype=float))
 
 
+def _recursive_growth_regression_with_covariates(
+    train_df: pd.DataFrame,
+    target_col: str,
+    horizon: int,
+    regressor_builder,
+    lags: int = 4,
+    max_covariates: int = 80,
+    include_md_features: bool = True,
+    max_md_covariates: int = 24,
+    md_panel_path: Path = DEFAULT_MD_PANEL_PATH,
+) -> np.ndarray:
+    growth_df, growth_target_col, last_level = _build_growth_target_frame(train_df=train_df, target_col=target_col)
+    if include_md_features:
+        growth_df = _augment_with_md_features(
+            train_df=growth_df,
+            md_panel_path=md_panel_path,
+            max_md_covariates=max_md_covariates,
+        )
+
+    g_all = pd.to_numeric(growth_df[growth_target_col], errors="coerce")
+    g_mask = g_all.notna()
+    if not g_mask.any():
+        return np.repeat(last_level, horizon)
+
+    g = g_all[g_mask].to_numpy(dtype=float)
+    if g.size <= lags + 1:
+        return _growth_path_from_last_growth(last_level=last_level, g_history=g, horizon=horizon)
+
+    q_all = pd.PeriodIndex(growth_df["quarter"], freq="Q-DEC")
+    q_hist = pd.PeriodIndex(growth_df.loc[g_mask, "quarter"], freq="Q-DEC")
+    q_future = [q_hist[-1] + i for i in range(1, horizon + 1)]
+
+    covariates = _select_covariates_for_wrapped_models(
+        train_df=growth_df,
+        target_col=growth_target_col,
+        max_covariates=max_covariates,
+    )
+    if not covariates:
+        return _growth_path_from_last_growth(last_level=last_level, g_history=g, horizon=horizon)
+
+    cov_panel = growth_df.assign(__q=q_all).groupby("__q", sort=True)[covariates].last()
+    cov_panel = cov_panel.reindex(pd.PeriodIndex(list(q_hist) + list(q_future), freq="Q-DEC")).ffill().bfill().fillna(0.0)
+    hist_cov = cov_panel.loc[q_hist, covariates].to_numpy(dtype=float)
+    fut_cov = cov_panel.loc[q_future, covariates].to_numpy(dtype=float)
+
+    x_rows: list[np.ndarray] = []
+    y_rows: list[float] = []
+    for t in range(lags, g.size):
+        row = np.concatenate([g[t - lags : t], hist_cov[t]], axis=0)
+        if not np.isfinite(row).all():
+            continue
+        x_rows.append(row)
+        y_rows.append(float(g[t]))
+
+    if len(y_rows) < max(12, lags + 4):
+        return _growth_path_from_last_growth(last_level=last_level, g_history=g, horizon=horizon)
+
+    x = np.asarray(x_rows, dtype=float)
+    y_target = np.asarray(y_rows, dtype=float)
+
+    model = regressor_builder()
+    model.fit(x, y_target)
+
+    hist_g = list(g.astype(float))
+    preds_g: list[float] = []
+    for step in range(horizon):
+        lag_vec = np.asarray(hist_g[-lags:], dtype=float)
+        feat = np.concatenate([lag_vec, fut_cov[step]], axis=0).reshape(1, -1)
+        pred = float(model.predict(feat)[0])
+        preds_g.append(pred)
+        hist_g.append(pred)
+
+    return levels_from_saar_growth(last_level=last_level, g_hat=np.asarray(preds_g, dtype=float))
+
+
 @dataclass
 class _TaskShim:
     horizon: int
@@ -674,6 +800,46 @@ class _WrappedFevModel(RealtimeModel):
             return np.repeat(y[-1], horizon)
 
 
+class _WrappedFevGrowthModel(RealtimeModel):
+    def __init__(self, name: str, builder, max_covariates: int = 120) -> None:
+        super().__init__(name=name)
+        self._builder = builder
+        self.max_covariates = int(max_covariates)
+        self._model = None
+
+    def _get_model(self):
+        if self._model is None:
+            self._model = self._builder()
+        return self._model
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        try:
+            growth_df, growth_target_col, last_level = _build_growth_target_frame(train_df=train_df, target_col=target_col)
+            g_hist = pd.to_numeric(growth_df[growth_target_col], errors="coerce").dropna().to_numpy(dtype=float)
+            if g_hist.size < 8:
+                return _growth_path_from_last_growth(last_level=last_level, g_history=g_hist, horizon=horizon)
+
+            covs = _select_covariates_for_wrapped_models(
+                train_df=growth_df,
+                target_col=growth_target_col,
+                max_covariates=self.max_covariates,
+            )
+            past_data, future_data, task = _build_single_series_datasets(
+                train_df=growth_df,
+                target_col=growth_target_col,
+                horizon=horizon,
+                covariate_cols=covs,
+            )
+            pred_ds = self._get_model().predict(past_data=past_data, future_data=future_data, task=task)
+            g_hat = np.asarray(pred_ds["predictions"][0], dtype=float).reshape(-1)
+            if g_hat.size != horizon or not np.isfinite(g_hat).all():
+                raise ValueError("Wrapped model returned invalid growth forecasts.")
+            return levels_from_saar_growth(last_level=last_level, g_hat=g_hat)
+        except Exception:
+            y = _target_array(train_df=train_df, target_col=target_col)
+            return np.repeat(y[-1], horizon)
+
+
 class NaiveLastModel(RealtimeModel):
     def __init__(self) -> None:
         super().__init__(name="naive_last")
@@ -681,6 +847,16 @@ class NaiveLastModel(RealtimeModel):
     def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
         y = _target_array(train_df=train_df, target_col=target_col)
         return np.repeat(y[-1], horizon)
+
+
+class NaiveLastGrowthModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="naive_last_growth")
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        y_all, last_level = _target_series_and_last_level(train_df=train_df, target_col=target_col)
+        g_hist = saar_growth_series_from_levels(y_all).dropna().to_numpy(dtype=float)
+        return _growth_path_from_last_growth(last_level=last_level, g_history=g_hist, horizon=horizon)
 
 
 class RandomWalkDriftLogModel(RealtimeModel):
@@ -823,6 +999,45 @@ class RandomPermutationModel(RealtimeModel):
         return np.tile(perm, reps)[:horizon].astype(float)
 
 
+def _growth_training_history(
+    train_df: pd.DataFrame,
+    target_col: str,
+) -> tuple[np.ndarray, pd.PeriodIndex, float]:
+    growth_df, growth_target_col, last_level = _build_growth_target_frame(train_df=train_df, target_col=target_col)
+    g_all = pd.to_numeric(growth_df[growth_target_col], errors="coerce")
+    mask = g_all.notna()
+    g_hist = g_all[mask].to_numpy(dtype=float)
+    q_hist = pd.PeriodIndex(growth_df.loc[mask, "quarter"], freq="Q-DEC")
+    return g_hist, q_hist, last_level
+
+
+def _forecast_growth_with_statsforecast(
+    train_df: pd.DataFrame,
+    target_col: str,
+    horizon: int,
+    model_builder,
+) -> np.ndarray:
+    g_hist, q_hist, last_level = _growth_training_history(train_df=train_df, target_col=target_col)
+    if g_hist.size < 8:
+        return _growth_path_from_last_growth(last_level=last_level, g_history=g_hist, horizon=horizon)
+
+    ds = q_hist.to_timestamp(how="end")
+    sf_df = pd.DataFrame({"unique_id": "__series__", "ds": ds, "y": g_hist})
+
+    try:
+        from statsforecast import StatsForecast
+
+        sf = StatsForecast(models=[model_builder()], freq="Q")
+        fc = sf.forecast(df=sf_df, h=horizon)
+        point_col = [c for c in fc.columns if c not in {"unique_id", "ds"}][0]
+        g_hat = fc[point_col].to_numpy(dtype=float)
+        if g_hat.size != horizon or not np.isfinite(g_hat).all():
+            raise ValueError("statsforecast returned invalid growth forecasts.")
+        return levels_from_saar_growth(last_level=last_level, g_hat=g_hat)
+    except Exception:
+        return _growth_path_from_last_growth(last_level=last_level, g_history=g_hist, horizon=horizon)
+
+
 class AutoARIMALevelModel(RealtimeModel):
     def __init__(self) -> None:
         super().__init__(name="auto_arima")
@@ -846,6 +1061,24 @@ class AutoARIMALevelModel(RealtimeModel):
             return fc[point_col].to_numpy(dtype=float)
         except Exception:
             return np.repeat(y[-1], horizon)
+
+
+class AutoARIMAGrowthModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="auto_arima_growth")
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        def _builder():
+            from statsforecast.models import AutoARIMA
+
+            return AutoARIMA(season_length=4)
+
+        return _forecast_growth_with_statsforecast(
+            train_df=train_df,
+            target_col=target_col,
+            horizon=horizon,
+            model_builder=_builder,
+        )
 
 
 class AutoETSLevelModel(RealtimeModel):
@@ -873,6 +1106,27 @@ class AutoETSLevelModel(RealtimeModel):
             return np.repeat(y[-1], horizon)
 
 
+class AutoETSGrowthModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="auto_ets_growth")
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        def _builder():
+            from statsforecast.models import AutoETS
+
+            try:
+                return AutoETS(season_length=4)
+            except TypeError:
+                return AutoETS()
+
+        return _forecast_growth_with_statsforecast(
+            train_df=train_df,
+            target_col=target_col,
+            horizon=horizon,
+            model_builder=_builder,
+        )
+
+
 class ThetaLevelModel(RealtimeModel):
     def __init__(self) -> None:
         super().__init__(name="theta")
@@ -898,6 +1152,27 @@ class ThetaLevelModel(RealtimeModel):
             return np.repeat(y[-1], horizon)
 
 
+class ThetaGrowthModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="theta_growth")
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        def _builder():
+            from statsforecast.models import Theta
+
+            try:
+                return Theta(season_length=4)
+            except TypeError:
+                return Theta()
+
+        return _forecast_growth_with_statsforecast(
+            train_df=train_df,
+            target_col=target_col,
+            horizon=horizon,
+            model_builder=_builder,
+        )
+
+
 class LocalTrendSSMModel(RealtimeModel):
     def __init__(self) -> None:
         super().__init__(name="local_trend_ssm")
@@ -916,6 +1191,28 @@ class LocalTrendSSMModel(RealtimeModel):
             return np.exp(pred_log)
         except Exception:
             return np.repeat(y[-1], horizon)
+
+
+class LocalTrendSSMGrowthModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="local_trend_ssm_growth")
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        g_hist, _, last_level = _growth_training_history(train_df=train_df, target_col=target_col)
+        if g_hist.size < 6:
+            return _growth_path_from_last_growth(last_level=last_level, g_history=g_hist, horizon=horizon)
+
+        try:
+            from statsmodels.tsa.statespace.structural import UnobservedComponents
+
+            model = UnobservedComponents(endog=g_hist, level="local linear trend")
+            res = model.fit(disp=False)
+            g_hat = np.asarray(res.forecast(steps=horizon), dtype=float)
+            if g_hat.size != horizon or not np.isfinite(g_hat).all():
+                raise ValueError("local_trend_ssm_growth produced invalid growth forecasts.")
+            return levels_from_saar_growth(last_level=last_level, g_hat=g_hat)
+        except Exception:
+            return _growth_path_from_last_growth(last_level=last_level, g_history=g_hist, horizon=horizon)
 
 
 class RandomForestLevelModel(RealtimeModel):
@@ -946,6 +1243,48 @@ class RandomForestLevelModel(RealtimeModel):
             )
 
         return _recursive_log_level_regression_with_covariates(
+            train_df=train_df,
+            target_col=target_col,
+            horizon=horizon,
+            regressor_builder=_builder,
+            lags=self.lags,
+            max_covariates=self.max_covariates,
+            include_md_features=True,
+            max_md_covariates=self.max_md_covariates,
+            md_panel_path=self.md_panel_path,
+        )
+
+
+class RandomForestGrowthModel(RandomForestLevelModel):
+    def __init__(
+        self,
+        seed: int = 0,
+        lags: int = 4,
+        max_covariates: int = 80,
+        max_md_covariates: int = 24,
+        md_panel_path: Path = DEFAULT_MD_PANEL_PATH,
+    ) -> None:
+        super().__init__(
+            seed=seed,
+            lags=lags,
+            max_covariates=max_covariates,
+            max_md_covariates=max_md_covariates,
+            md_panel_path=md_panel_path,
+        )
+        self.name = "random_forest_growth"
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        def _builder():
+            from sklearn.ensemble import RandomForestRegressor
+
+            return RandomForestRegressor(
+                n_estimators=300,
+                max_depth=6,
+                random_state=self.seed,
+                n_jobs=1,
+            )
+
+        return _recursive_growth_regression_with_covariates(
             train_df=train_df,
             target_col=target_col,
             horizon=horizon,
@@ -1002,10 +1341,65 @@ class XGBoostLevelModel(RealtimeModel):
         )
 
 
+class XGBoostGrowthModel(XGBoostLevelModel):
+    def __init__(
+        self,
+        seed: int = 0,
+        lags: int = 4,
+        max_covariates: int = 80,
+        max_md_covariates: int = 24,
+        md_panel_path: Path = DEFAULT_MD_PANEL_PATH,
+    ) -> None:
+        super().__init__(
+            seed=seed,
+            lags=lags,
+            max_covariates=max_covariates,
+            max_md_covariates=max_md_covariates,
+            md_panel_path=md_panel_path,
+        )
+        self.name = "xgboost_growth"
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        def _builder():
+            import xgboost as xgb
+
+            return xgb.XGBRegressor(
+                objective="reg:squarederror",
+                n_estimators=300,
+                max_depth=3,
+                learning_rate=0.05,
+                subsample=0.9,
+                colsample_bytree=0.9,
+                random_state=self.seed,
+                n_jobs=1,
+            )
+
+        return _recursive_growth_regression_with_covariates(
+            train_df=train_df,
+            target_col=target_col,
+            horizon=horizon,
+            regressor_builder=_builder,
+            lags=self.lags,
+            max_covariates=self.max_covariates,
+            include_md_features=True,
+            max_md_covariates=self.max_md_covariates,
+            md_panel_path=self.md_panel_path,
+        )
+
+
 class FactorPCAQDRealtimeModel(_WrappedFevModel):
     def __init__(self) -> None:
         super().__init__(
             name="factor_pca_qd",
+            builder=lambda: __import__("fev_macro.models.factor_models", fromlist=["QuarterlyFactorPCAModel"]).QuarterlyFactorPCAModel(),
+            max_covariates=120,
+        )
+
+
+class FactorPCAQDGrowthRealtimeModel(_WrappedFevGrowthModel):
+    def __init__(self) -> None:
+        super().__init__(
+            name="factor_pca_qd_growth",
             builder=lambda: __import__("fev_macro.models.factor_models", fromlist=["QuarterlyFactorPCAModel"]).QuarterlyFactorPCAModel(),
             max_covariates=120,
         )
@@ -1029,10 +1423,43 @@ class BVARMinnesota20RealtimeModel(_WrappedFevModel):
         )
 
 
+class BVARMinnesotaGrowth8RealtimeModel(_WrappedFevGrowthModel):
+    def __init__(self) -> None:
+        super().__init__(
+            name="bvar_minnesota_growth_8",
+            builder=lambda: __import__(
+                "fev_macro.models.bvar_minnesota",
+                fromlist=["BVARMinnesotaGrowth8Model"],
+            ).BVARMinnesotaGrowth8Model(),
+            max_covariates=120,
+        )
+
+
+class BVARMinnesotaGrowth20RealtimeModel(_WrappedFevGrowthModel):
+    def __init__(self) -> None:
+        super().__init__(
+            name="bvar_minnesota_growth_20",
+            builder=lambda: __import__(
+                "fev_macro.models.bvar_minnesota",
+                fromlist=["BVARMinnesotaGrowth20Model"],
+            ).BVARMinnesotaGrowth20Model(),
+            max_covariates=120,
+        )
+
+
 class Chronos2RealtimeModel(_WrappedFevModel):
     def __init__(self) -> None:
         super().__init__(
             name="chronos2",
+            builder=lambda: __import__("fev_macro.models.chronos2", fromlist=["Chronos2Model"]).Chronos2Model(),
+            max_covariates=40,
+        )
+
+
+class Chronos2GrowthRealtimeModel(_WrappedFevGrowthModel):
+    def __init__(self) -> None:
+        super().__init__(
+            name="chronos2_growth",
             builder=lambda: __import__("fev_macro.models.chronos2", fromlist=["Chronos2Model"]).Chronos2Model(),
             max_covariates=40,
         )
@@ -1046,14 +1473,23 @@ class MixedFreqDFMMDVintageModel(RealtimeModel):
         n_factors: int = 6,
         max_lag: int = 2,
         alpha: float = 1.0,
+        target_mode: str = "level",
+        excluded_years: Sequence[int] = (),
         seed: int = 0,
     ) -> None:
-        super().__init__(name="mixed_freq_dfm_md")
+        normalized_target_mode = str(target_mode).strip().lower()
+        if normalized_target_mode not in {"level", "growth"}:
+            raise ValueError("target_mode must be one of {'level', 'growth'}")
+
+        model_name = "mixed_freq_dfm_md_growth" if normalized_target_mode == "growth" else "mixed_freq_dfm_md"
+        super().__init__(name=model_name)
         self.md_panel_path = Path(md_panel_path)
         self.max_monthly_covariates = int(max_monthly_covariates)
         self.n_factors = int(n_factors)
         self.max_lag = int(max_lag)
         self.alpha = float(alpha)
+        self.target_mode = normalized_target_mode
+        self.excluded_years = tuple(sorted({int(y) for y in excluded_years}))
         self.seed = int(seed)
         self._panel: pd.DataFrame | None = None
         self._cache_quarterly: dict[str, pd.DataFrame] = {}
@@ -1088,36 +1524,50 @@ class MixedFreqDFMMDVintageModel(RealtimeModel):
         sub[covars] = sub[covars].ffill().bfill().fillna(0.0)
         sub["quarter"] = sub["timestamp"].dt.to_period("Q-DEC")
         q = sub.groupby("quarter", sort=True)[covars].mean(numeric_only=True).ffill().bfill().fillna(0.0)
+        if self.excluded_years:
+            q = q.loc[~q.index.year.isin(list(self.excluded_years))]
         self._cache_quarterly[vintage_id] = q
         return q
 
     def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
         y_series = pd.to_numeric(train_df[target_col], errors="coerce")
-        y_mask = y_series.notna()
-        if not y_mask.any():
+        observed_levels = y_series.dropna()
+        if observed_levels.empty:
             raise ValueError("No target history available.")
-        y = y_series[y_mask].to_numpy(dtype=float)
-        y_quarters = pd.PeriodIndex(train_df.loc[y_mask, "quarter"], freq="Q-DEC")
+
+        last_level = float(observed_levels.iloc[-1])
+        if self.target_mode == "growth":
+            growth_series = saar_growth_series_from_levels(y_series)
+            target_mask = growth_series.notna()
+            y = growth_series[target_mask].to_numpy(dtype=float)
+            y_quarters = pd.PeriodIndex(train_df.loc[target_mask, "quarter"], freq="Q-DEC")
+            fallback = _growth_path_from_last_growth(last_level=last_level, g_history=y, horizon=horizon)
+        else:
+            target_mask = y_series.notna()
+            y = y_series[target_mask].to_numpy(dtype=float)
+            y_quarters = pd.PeriodIndex(train_df.loc[target_mask, "quarter"], freq="Q-DEC")
+            fallback = np.repeat(last_level, horizon)
+
         if y.size < 20:
-            return np.repeat(y[-1], horizon)
+            return fallback
 
         vintage_id = str(train_df.get("__origin_vintage", pd.Series([np.nan])).iloc[-1])
         if vintage_id in {"nan", "None"}:
-            return np.repeat(y[-1], horizon)
+            return fallback
 
         try:
             qf = self._quarterly_factors(vintage_id=vintage_id)
         except Exception:
-            return np.repeat(y[-1], horizon)
+            return fallback
 
         cutoff_q = pd.Period(train_df["quarter"].max(), freq="Q-DEC")
         qf = qf.loc[qf.index <= cutoff_q]
         if qf.empty:
-            return np.repeat(y[-1], horizon)
+            return fallback
 
         qf_train = qf.reindex(y_quarters).ffill().bfill().fillna(0.0)
         if qf_train.empty:
-            return np.repeat(y[-1], horizon)
+            return fallback
         F_past = qf_train.to_numpy(dtype=float)
 
         future_quarters = [y_quarters[-1] + i for i in range(1, horizon + 1)]
@@ -1138,11 +1588,11 @@ class MixedFreqDFMMDVintageModel(RealtimeModel):
             from sklearn.linear_model import Ridge
             from sklearn.preprocessing import StandardScaler
         except Exception:
-            return np.repeat(y[-1], horizon)
+            return fallback
 
         lag = min(self.max_lag, max(1, y.size // 12))
         if y.size <= lag + 4:
-            return np.repeat(y[-1], horizon)
+            return fallback
 
         scaler = StandardScaler(with_mean=True, with_std=True)
         F_scaled = scaler.fit_transform(F_past)
@@ -1160,7 +1610,7 @@ class MixedFreqDFMMDVintageModel(RealtimeModel):
         X_train = np.vstack(rows)
         y_train = np.asarray(targets, dtype=float)
         if y_train.size < max(10, lag + 3):
-            return np.repeat(y[-1], horizon)
+            return fallback
 
         reg = Ridge(alpha=self.alpha, random_state=self.seed)
         reg.fit(X_train, y_train)
@@ -1177,7 +1627,33 @@ class MixedFreqDFMMDVintageModel(RealtimeModel):
                 pred = float(y_hist[-1])
             forecasts.append(pred)
             y_hist.append(pred)
-        return np.asarray(forecasts, dtype=float)
+        fc = np.asarray(forecasts, dtype=float)
+        if self.target_mode == "growth":
+            return levels_from_saar_growth(last_level=last_level, g_hat=fc)
+        return fc
+
+
+class MixedFreqDFMMDVintageGrowthModel(MixedFreqDFMMDVintageModel):
+    def __init__(
+        self,
+        md_panel_path: str = "data/panels/fred_md_vintage_panel.parquet",
+        max_monthly_covariates: int = 100,
+        n_factors: int = 6,
+        max_lag: int = 2,
+        alpha: float = 1.0,
+        excluded_years: Sequence[int] = (),
+        seed: int = 0,
+    ) -> None:
+        super().__init__(
+            md_panel_path=md_panel_path,
+            max_monthly_covariates=max_monthly_covariates,
+            n_factors=n_factors,
+            max_lag=max_lag,
+            alpha=alpha,
+            target_mode="growth",
+            excluded_years=excluded_years,
+            seed=seed,
+        )
 
 
 class EnsembleAvgTop3RealtimeModel(RealtimeModel):
@@ -1210,29 +1686,87 @@ class EnsembleWeightedTop5RealtimeModel(RealtimeModel):
         return np.tensordot(self.weights, arr, axes=(0, 0))
 
 
+class EnsembleAvgTop3UnprocessedLLRealtimeModel(EnsembleAvgTop3RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "ensemble_avg_top3_unprocessed_ll"
+
+
+class EnsembleWeightedTop5UnprocessedLLRealtimeModel(EnsembleWeightedTop5RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.name = "ensemble_weighted_top5_unprocessed_ll"
+
+
+class EnsembleAvgTop3ProcessedGRealtimeModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="ensemble_avg_top3_processed_g")
+        self.members = [AutoARIMAGrowthModel(), LocalTrendSSMGrowthModel(), BVARMinnesotaGrowth8RealtimeModel()]
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        preds = [m.forecast_levels(train_df=train_df, horizon=horizon, target_col=target_col) for m in self.members]
+        arr = np.stack(preds, axis=0)
+        return arr.mean(axis=0)
+
+
+class EnsembleWeightedTop5ProcessedGRealtimeModel(RealtimeModel):
+    def __init__(self) -> None:
+        super().__init__(name="ensemble_weighted_top5_processed_g")
+        self.members = [
+            AutoARIMAGrowthModel(),
+            ThetaGrowthModel(),
+            LocalTrendSSMGrowthModel(),
+            FactorPCAQDGrowthRealtimeModel(),
+            BVARMinnesotaGrowth8RealtimeModel(),
+        ]
+        self.weights = np.asarray([0.26, 0.22, 0.20, 0.17, 0.15], dtype=float)
+        self.weights = self.weights / self.weights.sum()
+
+    def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
+        preds = [m.forecast_levels(train_df=train_df, horizon=horizon, target_col=target_col) for m in self.members]
+        arr = np.stack(preds, axis=0)
+        return np.tensordot(self.weights, arr, axes=(0, 0))
+
+
 BUILTIN_MODELS: dict[str, type[RealtimeModel]] = {
     "mean": MeanLevelModel,
     "drift": DriftLevelModel,
     "seasonal_naive": SeasonalNaiveLevelModel,
     "naive_last": NaiveLastModel,
+    "naive_last_growth": NaiveLastGrowthModel,
     "random_normal": RandomNormalModel,
     "random_uniform": RandomUniformModel,
     "random_permutation": RandomPermutationModel,
     "rw_drift_log": RandomWalkDriftLogModel,
     "ar4_growth": AR4GrowthModel,
     "auto_arima": AutoARIMALevelModel,
+    "auto_arima_growth": AutoARIMAGrowthModel,
     "auto_ets": AutoETSLevelModel,
+    "auto_ets_growth": AutoETSGrowthModel,
     "theta": ThetaLevelModel,
+    "theta_growth": ThetaGrowthModel,
     "local_trend_ssm": LocalTrendSSMModel,
+    "local_trend_ssm_growth": LocalTrendSSMGrowthModel,
     "random_forest": RandomForestLevelModel,
+    "random_forest_growth": RandomForestGrowthModel,
     "xgboost": XGBoostLevelModel,
+    "xgboost_growth": XGBoostGrowthModel,
     "factor_pca_qd": FactorPCAQDRealtimeModel,
+    "factor_pca_qd_growth": FactorPCAQDGrowthRealtimeModel,
     "bvar_minnesota_8": BVARMinnesota8RealtimeModel,
     "bvar_minnesota_20": BVARMinnesota20RealtimeModel,
+    "bvar_minnesota_growth_8": BVARMinnesotaGrowth8RealtimeModel,
+    "bvar_minnesota_growth_20": BVARMinnesotaGrowth20RealtimeModel,
     "mixed_freq_dfm_md": MixedFreqDFMMDVintageModel,
+    "mixed_freq_dfm_md_growth": MixedFreqDFMMDVintageGrowthModel,
     "chronos2": Chronos2RealtimeModel,
+    "chronos2_growth": Chronos2GrowthRealtimeModel,
     "ensemble_avg_top3": EnsembleAvgTop3RealtimeModel,
+    "ensemble_avg_top3_unprocessed_ll": EnsembleAvgTop3UnprocessedLLRealtimeModel,
+    "ensemble_avg_top3_processed_g": EnsembleAvgTop3ProcessedGRealtimeModel,
     "ensemble_weighted_top5": EnsembleWeightedTop5RealtimeModel,
+    "ensemble_weighted_top5_unprocessed_ll": EnsembleWeightedTop5UnprocessedLLRealtimeModel,
+    "ensemble_weighted_top5_processed_g": EnsembleWeightedTop5ProcessedGRealtimeModel,
 }
 
 
@@ -1267,11 +1801,11 @@ def resolve_models(models: Sequence[str | RealtimeModel | BaseModel]) -> list[Ba
             continue
 
         key = str(m).strip().lower()
-        if key in MODEL_REGISTRY:
-            resolved.append(build_models([key], seed=0)[key])
-            continue
         if key in BUILTIN_MODELS:
             resolved.append(_RealtimeModelAdapter(BUILTIN_MODELS[key]()))
+            continue
+        if key in MODEL_REGISTRY:
+            resolved.append(build_models([key], seed=0)[key])
             continue
         raise ValueError(f"Unknown model '{m}'. Available: {sorted(set(BUILTIN_MODELS) | set(MODEL_REGISTRY))}")
 
@@ -1279,6 +1813,33 @@ def resolve_models(models: Sequence[str | RealtimeModel | BaseModel]) -> list[Ba
         raise ValueError("No models were provided.")
 
     return resolved
+
+
+def apply_model_runtime_options(
+    model_list: Sequence[BaseModel],
+    *,
+    md_panel_path: str | Path | None = None,
+    mixed_freq_excluded_years: Sequence[int] | None = None,
+) -> None:
+    md_path = Path(md_panel_path).expanduser().resolve() if md_panel_path else None
+    excluded_years = tuple(sorted({int(y) for y in (mixed_freq_excluded_years or [])}))
+
+    for model in model_list:
+        realtime_model = getattr(model, "realtime_model", None)
+        if realtime_model is None:
+            continue
+
+        if md_path is not None and hasattr(realtime_model, "md_panel_path"):
+            setattr(realtime_model, "md_panel_path", Path(md_path))
+            if hasattr(realtime_model, "_panel"):
+                setattr(realtime_model, "_panel", None)
+            if hasattr(realtime_model, "_cache_quarterly"):
+                setattr(realtime_model, "_cache_quarterly", {})
+
+        if hasattr(realtime_model, "excluded_years"):
+            setattr(realtime_model, "excluded_years", excluded_years)
+            if hasattr(realtime_model, "_cache_quarterly"):
+                setattr(realtime_model, "_cache_quarterly", {})
 
 
 def _build_quarterly_origins(
@@ -1363,6 +1924,8 @@ def run_backtest(
     release_stages: Sequence[str] | None = None,
     min_target_quarter: str | pd.Period | None = "2018Q1",
     ragged_edge_covariates: bool = True,
+    md_panel_path: str | Path | None = None,
+    mixed_freq_excluded_years: Sequence[int] | None = None,
 ) -> pd.DataFrame:
     if origin_schedule not in {"quarterly", "monthly"}:
         raise ValueError("origin_schedule must be one of {'quarterly', 'monthly'}")
@@ -1374,6 +1937,11 @@ def run_backtest(
     stage_list = _normalize_release_stages(release_stages=release_stages, origin_schedule=origin_schedule)
     min_target_period = pd.Period(min_target_quarter, freq="Q-DEC") if min_target_quarter is not None else None
     model_list = resolve_models(models)
+    apply_model_runtime_options(
+        model_list=model_list,
+        md_panel_path=md_panel_path,
+        mixed_freq_excluded_years=mixed_freq_excluded_years,
+    )
 
     if "valid_origin" not in release_table.columns:
         raise ValueError("Release table must include 'valid_origin'. Use load_release_table().")
@@ -1677,14 +2245,17 @@ __all__ = [
     "NaiveLastModel",
     "RandomWalkDriftLogModel",
     "RealtimeModel",
+    "apply_model_runtime_options",
     "build_origin_datasets",
     "build_vintage_calendar",
     "compute_metrics",
     "compute_vintage_asof_date",
+    "levels_from_saar_growth",
     "load_release_table",
     "load_vintage_panel",
     "months_to_first_release",
     "months_to_first_release_bucket",
+    "saar_growth_series_from_levels",
     "resolve_models",
     "run_backtest",
     "select_training_vintage",
