@@ -762,6 +762,23 @@ def build_release_target_scaffold(
     }
 
 
+def format_gdp_item_id(
+    base: str,
+    release_metric: str,
+    release_stage: str,
+    target_transform: str,
+) -> str:
+    """Build a truth-aware GDP item id for evaluation datasets."""
+    base_norm = str(base).strip().lower()
+    metric_norm = str(release_metric).strip().lower()
+    stage_norm = str(release_stage).strip().lower()
+    transform_norm = str(target_transform).strip().lower()
+
+    if metric_norm in {"realtime_qoq_saar", "realtime_saar", "realtime_qoq_saar_pct"}:
+        return f"{base_norm}_qoq_saar_{stage_norm}_pct"
+    return f"{base_norm}_{stage_norm}_{transform_norm}"
+
+
 def apply_gdpc1_release_truth_target(
     dataset_df: pd.DataFrame,
     release_csv_path: str | Path | None = None,
@@ -817,16 +834,34 @@ def apply_gdpc1_release_truth_target(
     else:
         out["target"] = _transform_from_level(level_series=mapped_values, target_transform=target_transform).astype(float)
 
+    new_item_id = format_gdp_item_id(
+        base="gdpc1",
+        release_metric=metric_kind,
+        release_stage=stage,
+        target_transform=target_transform,
+    )
+    out["item_id"] = new_item_id
+
     covariate_columns = [c for c in out.columns if c not in {"item_id", "timestamp", "target", "quarter"}]
     rows_with_release_target = int(np.isfinite(out["target"].to_numpy(dtype=float)).sum())
     out = out.drop(columns=["quarter"])
     out = _drop_invalid_and_fill_covariates(out=out, covariate_columns=covariate_columns)
 
+    if metric_kind == "realtime_qoq_saar" or target_transform == "saar_growth":
+        target_units = "pct_qoq_saar"
+    elif target_transform == "log_level":
+        target_units = "log_level"
+    else:
+        target_units = "level"
+
     return out, {
         "source": "gdpc1_release_csv",
+        "item_id": new_item_id,
         "release_metric": metric_kind,
         "release_stage": stage,
         "release_column": stage_col,
+        "target_transform": target_transform,
+        "target_units": target_units,
         "release_csv_path": str(csv_path),
         "release_quarters_available": int(len(release_levels_by_quarter)),
         "rows_with_release_target": rows_with_release_target,

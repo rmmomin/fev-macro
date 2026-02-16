@@ -13,6 +13,7 @@ from .data import (
     DEFAULT_SOURCE_SERIES_CANDIDATES,
     DEFAULT_TARGET_SERIES_NAME,
     HistoricalQuarterlyVintageProvider,
+    RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN,
     SUPPORTED_TARGET_TRANSFORMS,
     apply_gdpc1_release_truth_target,
     build_covariate_df,
@@ -85,6 +86,16 @@ PROCESSED_STANDARD_MODELS: list[str] = [
     "factor_pca_qd",
     "mixed_freq_dfm_md",
 ]
+
+TASK_META_FIELDS: tuple[str, ...] = (
+    "release_stage",
+    "release_metric",
+    "target_transform",
+    "target_units",
+    "truth_item_id",
+    "covariate_mode",
+    "dataset_path",
+)
 
 
 def build_eval_arg_parser(
@@ -241,6 +252,15 @@ def build_eval_arg_parser(
         default=4,
         help="Tail quarters used for processed-covariate diagnostics.",
     )
+    parser.add_argument(
+        "--strict_truth_validation",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Validate that y_true matches the release-table truth column for first/second/third realtime SAAR. "
+            "Defaults to enabled for processed runs and disabled otherwise."
+        ),
+    )
     return parser
 
 
@@ -311,6 +331,10 @@ def run_eval_pipeline(
     results_dir.mkdir(parents=True, exist_ok=True)
 
     years_to_exclude = sorted({int(y) for y in (getattr(args, "exclude_years", None) or [])})
+    strict_truth_validation_arg = getattr(args, "strict_truth_validation", None)
+    strict_truth_validation = (
+        mode == "processed" if strict_truth_validation_arg is None else bool(strict_truth_validation_arg)
+    )
 
     base_gdp_df, base_meta = build_release_target_scaffold(
         release_csv_path=args.eval_release_csv,
@@ -339,6 +363,7 @@ def run_eval_pipeline(
     print(f"Profile: {profile}")
     print(f"Target transform: {target_transform}")
     print(f"Covariate mode: {mode}")
+    print(f"Strict truth validation: {'enabled' if strict_truth_validation else 'disabled'}")
     print(f"Model set: {getattr(args, 'model_set', model_set)}")
     if requested_models == MODELS_LL_UNPROCESSED:
         print("Using default model list: MODELS_LL_UNPROCESSED")
@@ -358,6 +383,7 @@ def run_eval_pipeline(
 
     all_tasks = []
     task_provider_by_name: dict[str, HistoricalQuarterlyVintageProvider] = {}
+    task_meta_by_task_name: dict[str, dict[str, Any]] = {}
 
     for stage in stages:
         gdp_df, eval_meta = apply_gdpc1_release_truth_target(
@@ -410,8 +436,8 @@ def run_eval_pipeline(
             f"contains_2020={has_2020}, excluded_years={years_to_exclude} (rows {before_n} -> {after_n})"
         )
 
-        dataset_suffix = "" if len(stages) == 1 else f"_{stage}"
-        local_dataset_path = results_dir / f"{str(args.target).lower()}_dataset{dataset_suffix}.parquet"
+        dataset_id = str(eval_meta.get("item_id", "") or str(args.target).strip().lower())
+        local_dataset_path = results_dir / f"{dataset_id}_dataset.parquet"
         export_local_dataset_parquet(
             gdp_task_df,
             output_path=local_dataset_path,
@@ -507,6 +533,19 @@ def run_eval_pipeline(
             tasks = adjusted_tasks
 
         all_tasks.extend(tasks)
+        stage_for_meta = str(eval_meta.get("release_stage", stage))
+        task_meta = {
+            "release_stage": stage_for_meta,
+            "release_metric": eval_meta.get("release_metric"),
+            "target_transform": target_transform,
+            "target_units": eval_meta.get("target_units"),
+            "truth_item_id": eval_meta.get("item_id"),
+            "covariate_mode": mode,
+            "dataset_path": str(local_dataset_path),
+        }
+        for task in tasks:
+            task_meta_by_task_name[str(task.task_name)] = dict(task_meta)
+
         if vintage_provider is not None:
             for task in tasks:
                 task_provider_by_name[str(task.task_name)] = vintage_provider
@@ -543,6 +582,8 @@ def run_eval_pipeline(
         past_data_adapter=past_data_adapter,
     )
 
+    _enrich_summaries_with_task_meta(summaries=summaries, task_meta_by_task_name=task_meta_by_task_name)
+
     summaries_jsonl = results_dir / "summaries.jsonl"
     summaries_csv = results_dir / "summaries.csv"
     save_summaries(summaries=summaries, jsonl_path=summaries_jsonl, csv_path=summaries_csv)
@@ -564,6 +605,16 @@ def run_eval_pipeline(
         records_df = records_df.dropna(subset=["timestamp"]).sort_values(
             ["task_name", "model_name", "window_idx", "item_id", "horizon_step"]
         )
+    records_df = _enrich_prediction_records_with_task_meta(
+        records_df=records_df,
+        task_meta_by_task_name=task_meta_by_task_name,
+    )
+    validate_y_true_matches_release_table(
+        records_df=records_df,
+        release_csv_path=args.eval_release_csv,
+        tolerance=1e-9,
+        strict=strict_truth_validation,
+    )
 
     predictions_csv = results_dir / "predictions_per_window.csv"
     records_df.to_csv(predictions_csv, index=False)
@@ -607,6 +658,144 @@ def run_eval_pipeline(
     if not pairwise_df.empty:
         print("Top pairwise rows:")
         print(pairwise_df.head(10).to_string(index=False))
+
+
+def _enrich_summaries_with_task_meta(
+    summaries: list[dict[str, Any]],
+    task_meta_by_task_name: dict[str, dict[str, Any]],
+) -> None:
+    for summary in summaries:
+        task_name = str(summary.get("task_name", ""))
+        task_meta = task_meta_by_task_name.get(task_name, {})
+        for field in TASK_META_FIELDS:
+            summary[field] = task_meta.get(field)
+
+
+def _enrich_prediction_records_with_task_meta(
+    records_df: pd.DataFrame,
+    task_meta_by_task_name: dict[str, dict[str, Any]],
+) -> pd.DataFrame:
+    out = records_df.copy()
+    if "task_name" not in out.columns:
+        for field in TASK_META_FIELDS:
+            out[field] = pd.Series(index=out.index, dtype=object)
+        return out
+
+    task_meta = out["task_name"].map(lambda task_name: task_meta_by_task_name.get(str(task_name), {}))
+    for field in TASK_META_FIELDS:
+        out[field] = task_meta.map(lambda meta: meta.get(field) if isinstance(meta, dict) else None)
+    return out
+
+
+def validate_y_true_matches_release_table(
+    records_df: pd.DataFrame,
+    release_csv_path: str | Path,
+    tolerance: float = 1e-9,
+    strict: bool = True,
+) -> dict[str, dict[str, float | int]]:
+    if records_df.empty:
+        print("Truth check skipped: prediction records are empty.")
+        return {}
+
+    missing_cols = [c for c in ["timestamp", "y_true", "release_stage"] if c not in records_df.columns]
+    if missing_cols:
+        msg = f"Truth check skipped: prediction records missing required columns {missing_cols}."
+        if strict:
+            raise ValueError(msg)
+        print(f"WARNING: {msg}")
+        return {}
+
+    eval_rows = records_df.copy()
+    if "release_metric" in eval_rows.columns:
+        eval_rows = eval_rows.loc[eval_rows["release_metric"].astype(str) == "realtime_qoq_saar"].copy()
+    if eval_rows.empty:
+        print("Truth check skipped: no realtime_qoq_saar prediction rows.")
+        return {}
+
+    eval_rows["release_stage"] = eval_rows["release_stage"].astype(str).str.strip().str.lower()
+    stage_order = ["first", "second", "third"]
+    stages = [stage for stage in stage_order if stage in set(eval_rows["release_stage"].tolist())]
+    if not stages:
+        print("Truth check skipped: no first/second/third release stages in prediction rows.")
+        return {}
+
+    csv_path = Path(release_csv_path).expanduser().resolve()
+    release_df = pd.read_csv(csv_path)
+    if "observation_date" not in release_df.columns:
+        msg = f"Release CSV missing required column 'observation_date': {csv_path}"
+        if strict:
+            raise ValueError(msg)
+        print(f"WARNING: {msg}")
+        return {}
+
+    release_df = release_df.copy()
+    release_df["observation_date"] = pd.to_datetime(release_df["observation_date"], errors="coerce")
+    release_df = release_df.loc[release_df["observation_date"].notna()].copy()
+    if release_df.empty:
+        msg = f"Release CSV has no valid observation_date rows: {csv_path}"
+        if strict:
+            raise ValueError(msg)
+        print(f"WARNING: {msg}")
+        return {}
+
+    release_df["quarter"] = pd.PeriodIndex(release_df["observation_date"], freq="Q-DEC")
+    release_df = release_df.sort_values("observation_date").drop_duplicates(subset=["quarter"], keep="last")
+
+    stats: dict[str, dict[str, float | int]] = {}
+    failures: list[str] = []
+    for stage in stages:
+        expected_col = RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN[stage]
+        if expected_col not in release_df.columns:
+            failures.append(f"stage={stage} missing release CSV column {expected_col!r}")
+            continue
+
+        stage_rows = eval_rows.loc[eval_rows["release_stage"] == stage].copy()
+        if stage_rows.empty:
+            continue
+
+        stage_rows["timestamp"] = pd.to_datetime(stage_rows["timestamp"], errors="coerce")
+        stage_rows = stage_rows.loc[stage_rows["timestamp"].notna()].copy()
+        stage_rows["quarter"] = pd.PeriodIndex(stage_rows["timestamp"], freq="Q-DEC")
+
+        expected = release_df[["quarter", expected_col]].copy()
+        expected[expected_col] = pd.to_numeric(expected[expected_col], errors="coerce")
+        merged = stage_rows.merge(expected.rename(columns={expected_col: "expected_y_true"}), on="quarter", how="left")
+
+        actual = pd.to_numeric(merged["y_true"], errors="coerce").to_numpy(dtype=float)
+        expected_values = pd.to_numeric(merged["expected_y_true"], errors="coerce").to_numpy(dtype=float)
+
+        valid = np.isfinite(actual) & np.isfinite(expected_values)
+        abs_diff = np.abs(actual[valid] - expected_values[valid]) if valid.any() else np.array([], dtype=float)
+        max_abs_diff = float(abs_diff.max()) if abs_diff.size else float("nan")
+        mean_abs_diff = float(abs_diff.mean()) if abs_diff.size else float("nan")
+        num_bad_diff = int((abs_diff > tolerance).sum()) if abs_diff.size else 0
+        num_missing = int((~valid).sum())
+        num_bad = num_bad_diff + num_missing
+
+        stats[stage] = {
+            "max_abs_diff": max_abs_diff,
+            "mean_abs_diff": mean_abs_diff,
+            "num_bad": num_bad,
+            "num_rows": int(len(stage_rows)),
+        }
+
+        max_abs_diff_str = "nan" if not np.isfinite(max_abs_diff) else f"{max_abs_diff:.12g}"
+        mean_abs_diff_str = "nan" if not np.isfinite(mean_abs_diff) else f"{mean_abs_diff:.12g}"
+        print(f"Truth check {stage}: max_abs_diff={max_abs_diff_str}, mean_abs_diff={mean_abs_diff_str}, bad={num_bad}")
+
+        if num_bad > 0:
+            failures.append(
+                f"stage={stage} has {num_bad} mismatches/missing rows "
+                f"(max_abs_diff={max_abs_diff_str}, tolerance={tolerance:g})"
+            )
+
+    if failures:
+        msg = "Release-truth validation failed: " + "; ".join(failures)
+        if strict:
+            raise ValueError(msg)
+        print(f"WARNING: {msg}")
+
+    return stats
 
 
 def _compute_kpi_tables(
