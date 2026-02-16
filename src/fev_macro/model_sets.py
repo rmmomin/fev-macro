@@ -34,8 +34,6 @@ MODELS_G_PROCESSED: list[str] = [
     "bvar_minnesota_growth_20",
     "factor_pca_qd",
     "mixed_freq_dfm_md",
-    "nyfed_nowcast_mqdfm",
-    "ecb_nowcast_mqdfm",
     "ensemble_avg_top3",
     "ensemble_weighted_top5",
 ]

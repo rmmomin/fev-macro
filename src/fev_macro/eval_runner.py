@@ -54,8 +54,6 @@ FULL_PROFILE_MODELS: list[str] = [
     "ensemble_avg_top3",
     "ensemble_weighted_top5",
     "auto_arima",
-    "nyfed_nowcast_mqdfm",
-    "ecb_nowcast_mqdfm",
     "chronos2",
 ]
 
@@ -89,8 +87,6 @@ PROCESSED_STANDARD_MODELS: list[str] = [
     "xgboost",
     "factor_pca_qd",
     "mixed_freq_dfm_md",
-    "nyfed_nowcast_mqdfm",
-    "ecb_nowcast_mqdfm",
 ]
 
 TASK_META_FIELDS: tuple[str, ...] = (

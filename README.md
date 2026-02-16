@@ -30,28 +30,12 @@ make eval-processed-standard
 Details: [`docs/data_processing.md`](docs/data_processing.md)
 
 ## Models included
-Core baselines and multivariate models include `naive_last`, `drift`, `auto_arima`, `local_trend_ssm`, `random_forest`, `xgboost`, `factor_pca_qd`, `mixed_freq_dfm_md`, BVAR growth variants, and nowcasting variants.
+Core baselines and multivariate models include `naive_last`, `drift`, `auto_arima`, `local_trend_ssm`, `random_forest`, `xgboost`, `factor_pca_qd`, `mixed_freq_dfm_md`, and BVAR growth variants.
 
 Newly emphasized variants:
 - `ar4`
-- `nyfed_nowcast_mqdfm`
-- `ecb_nowcast_mqdfm`
 
 Full model catalog: [`docs/models.md`](docs/models.md)
-
-## Nowcasting model variants (NYFed/ECB-inspired)
-`nyfed_nowcast_mqdfm` and `ecb_nowcast_mqdfm` are benchmarking approximations, not reproductions of official NY Fed or ECB production nowcasts.
-
-Data limitations:
-- Some NY Fed specification series are not present in fixed FRED-MD/FRED-QD template panels.
-- Release-calendar timing is simplified relative to full publication-lag aware nowcasting systems.
-- ECB toolbox workflows target Euro Area data ecosystems, while this repo is US FRED panel based.
-
-| Model | Intent | Runtime behavior |
-|---|---|---|
-| `ar4` | Univariate AR(4) baseline | Uses `statsmodels.AutoReg`; falls back to naive last-value forecast on short history or fit failure |
-| `nyfed_nowcast_mqdfm` | NY Fed-inspired mixed-frequency block DFM | Uses `DynamicFactorMQ` when feasible; intersects required series with available panel columns; falls back safely on failure |
-| `ecb_nowcast_mqdfm` | ECB toolbox-inspired mixed-frequency DFM | Uses `DynamicFactorMQ` when feasible with available monthly signals; falls back safely on failure |
 
 ## Real-time evaluation policy
 Evaluation is always scored against release-consistent q/q SAAR GDP truth from `data/panels/gdpc1_releases_first_second_third.csv`, using `qoq_saar_growth_realtime_first_pct`, `qoq_saar_growth_realtime_second_pct`, and `qoq_saar_growth_realtime_third_pct` when available. For each quarter/release stage, realtime truth is built from one as-of panel vintage to avoid revised-history leakage from mixed-vintage denominators around reindex/rebenchmark events. Protocol details: [`docs/realtime_protocol.md`](docs/realtime_protocol.md).
@@ -77,5 +61,3 @@ make plot-2025q4
 - fbi library: <https://github.com/cykbennie/fbi>
 - ALFRED: <https://alfred.stlouisfed.org>
 - FRED API: <https://api.stlouisfed.org/fred>
-- NY Fed nowcast inspiration: <https://github.com/FRBNY-RG/New-York-Nowcast>
-- ECB toolbox inspiration: <https://github.com/baptiste-meunier/Nowcasting_toolbox>
