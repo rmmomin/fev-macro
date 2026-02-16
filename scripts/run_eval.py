@@ -9,29 +9,15 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from fev_macro.eval_runner import build_eval_arg_parser, run_eval_pipeline  # noqa: E402
+from fev_macro.eval_runner import (  # noqa: E402
+    FULL_PROFILE_MODELS,
+    build_eval_arg_parser,
+    parse_args_with_provenance,
+    run_eval_pipeline,
+)
 
 
-LEGACY_RUN_EVAL_MODELS = [
-    "naive_last",
-    "mean",
-    "drift",
-    "seasonal_naive",
-    "random_normal",
-    "random_uniform",
-    "random_permutation",
-    "random_forest",
-    "xgboost",
-    "local_trend_ssm",
-    "bvar_minnesota_8",
-    "bvar_minnesota_20",
-    "factor_pca_qd",
-    "mixed_freq_dfm_md",
-    "ensemble_avg_top3",
-    "ensemble_weighted_top5",
-    "auto_arima",
-    "chronos2",
-]
+LEGACY_RUN_EVAL_MODELS = list(FULL_PROFILE_MODELS)
 
 
 def parse_args():
@@ -49,7 +35,7 @@ def parse_args():
     parser.set_defaults(disable_covariates=True)
     parser.set_defaults(eval_release_metric="realtime_qoq_saar")
 
-    return parser.parse_args()
+    return parse_args_with_provenance(parser)
 
 
 def main() -> None:

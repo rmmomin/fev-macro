@@ -9,7 +9,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from fev_macro.eval_runner import build_eval_arg_parser, run_eval_pipeline  # noqa: E402
+from fev_macro.eval_runner import build_eval_arg_parser, parse_args_with_provenance, run_eval_pipeline  # noqa: E402
 
 
 def parse_args():
@@ -25,7 +25,7 @@ def parse_args():
         default_task_prefix="gdp_saar",
         default_qd_vintage_panel="data/panels/fred_qd_vintage_panel_processed.parquet",
     )
-    return parser.parse_args()
+    return parse_args_with_provenance(parser)
 
 
 def main() -> None:

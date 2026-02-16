@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 from typing import Any, Literal, Sequence, cast
 
@@ -29,6 +30,61 @@ from .tasks import make_gdp_tasks
 
 CovariateMode = Literal["unprocessed", "processed"]
 ModelSet = Literal["auto", "ll", "g"]
+Profile = Literal["smoke", "standard", "full"]
+
+PROFILE_CHOICES: tuple[Profile, ...] = ("smoke", "standard", "full")
+
+FULL_PROFILE_MODELS: list[str] = [
+    "naive_last",
+    "mean",
+    "drift",
+    "seasonal_naive",
+    "random_normal",
+    "random_uniform",
+    "random_permutation",
+    "random_forest",
+    "xgboost",
+    "local_trend_ssm",
+    "bvar_minnesota_8",
+    "bvar_minnesota_20",
+    "factor_pca_qd",
+    "mixed_freq_dfm_md",
+    "ensemble_avg_top3",
+    "ensemble_weighted_top5",
+    "auto_arima",
+    "chronos2",
+]
+
+SMOKE_PROFILE_MODELS: list[str] = [
+    "naive_last",
+    "drift",
+    "auto_arima",
+]
+
+UNPROCESSED_STANDARD_MODELS: list[str] = [
+    "naive_last",
+    "drift",
+    "auto_arima",
+    "theta",
+    "auto_ets",
+    "local_trend_ssm",
+    "random_forest",
+    "xgboost",
+    "bvar_minnesota_8",
+    "factor_pca_qd",
+    "mixed_freq_dfm_md",
+]
+
+PROCESSED_STANDARD_MODELS: list[str] = [
+    "naive_last",
+    "mean",
+    "auto_arima",
+    "local_trend_ssm",
+    "random_forest",
+    "xgboost",
+    "factor_pca_qd",
+    "mixed_freq_dfm_md",
+]
 
 
 def build_eval_arg_parser(
@@ -42,6 +98,13 @@ def build_eval_arg_parser(
     default_qd_vintage_panel: str = "data/panels/fred_qd_vintage_panel.parquet",
 ) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
+    parser.add_argument(
+        "--profile",
+        type=str,
+        choices=list(PROFILE_CHOICES),
+        default="standard",
+        help="Preset run profile. Defaults to 'standard'.",
+    )
     parser.add_argument("--target", type=str, default=DEFAULT_TARGET_SERIES_NAME)
     parser.add_argument(
         "--target_transform",
@@ -181,6 +244,17 @@ def build_eval_arg_parser(
     return parser
 
 
+def parse_args_with_provenance(
+    parser: argparse.ArgumentParser,
+    argv: Sequence[str] | None = None,
+) -> argparse.Namespace:
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    provided_dests = _collect_provided_dests(parser=parser, argv=raw_argv)
+    args = parser.parse_args(raw_argv)
+    setattr(args, "_provided_dests", provided_dests)
+    return args
+
+
 def run_eval_pipeline(
     *,
     covariate_mode: CovariateMode,
@@ -190,6 +264,7 @@ def run_eval_pipeline(
 ) -> None:
     mode = _normalize_covariate_mode(covariate_mode)
     args = cli_args
+    profile = _apply_profile_defaults(args=args, covariate_mode=mode)
 
     np.random.seed(int(args.seed))
 
@@ -261,6 +336,7 @@ def run_eval_pipeline(
 
     print(f"Base release-table dataset: {base_meta['release_csv_path']} (rows={base_meta['rows']})")
     print(f"Target series used: {args.target}")
+    print(f"Profile: {profile}")
     print(f"Target transform: {target_transform}")
     print(f"Covariate mode: {mode}")
     print(f"Model set: {getattr(args, 'model_set', model_set)}")
@@ -785,6 +861,73 @@ def _apply_fast_mode_hyperparameters(models: dict[str, Any]) -> None:
         models["xgboost"].n_estimators = 100
     if "local_trend_ssm" in models and hasattr(models["local_trend_ssm"], "maxiter"):
         models["local_trend_ssm"].maxiter = 50
+
+
+def _collect_provided_dests(parser: argparse.ArgumentParser, argv: Sequence[str]) -> set[str]:
+    option_to_dest: dict[str, str] = {}
+    for action in parser._actions:
+        for opt in action.option_strings:
+            option_to_dest[opt] = str(action.dest)
+
+    provided: set[str] = set()
+    for token in argv:
+        if not token.startswith("-") or token == "-":
+            continue
+        opt = token.split("=", 1)[0]
+        dest = option_to_dest.get(opt)
+        if dest:
+            provided.add(dest)
+    return provided
+
+
+def _profile_results_dir(covariate_mode: CovariateMode, profile: Profile) -> str:
+    if profile == "full":
+        return "results"
+    mode_prefix = "unprocessed" if covariate_mode == "unprocessed" else "processed"
+    return f"results/{mode_prefix}_{profile}"
+
+
+def _apply_profile_defaults(args: argparse.Namespace, covariate_mode: CovariateMode) -> Profile:
+    raw_profile = str(getattr(args, "profile", "standard") or "standard").strip().lower()
+    if raw_profile not in PROFILE_CHOICES:
+        raise ValueError(f"Unsupported profile={raw_profile!r}. Supported={PROFILE_CHOICES}.")
+    profile = cast(Profile, raw_profile)
+
+    provided = set(getattr(args, "_provided_dests", set()) or set())
+
+    def _set_if_not_provided(dest: str, value: Any) -> None:
+        if dest in provided:
+            return
+        setattr(args, dest, value)
+
+    if profile == "smoke":
+        _set_if_not_provided("horizons", [1, 4])
+        _set_if_not_provided("num_windows", 10)
+        _set_if_not_provided("metric", "RMSE")
+        _set_if_not_provided("models", list(SMOKE_PROFILE_MODELS))
+        _set_if_not_provided("disable_historical_vintages", True)
+
+    elif profile == "standard":
+        _set_if_not_provided("horizons", [1, 2, 4])
+        _set_if_not_provided("metric", "RMSE")
+        _set_if_not_provided("disable_historical_vintages", True)
+        if covariate_mode == "unprocessed":
+            _set_if_not_provided("target_transform", "log_level")
+            _set_if_not_provided("num_windows", 60)
+            _set_if_not_provided("models", list(UNPROCESSED_STANDARD_MODELS))
+        else:
+            _set_if_not_provided("target_transform", "saar_growth")
+            _set_if_not_provided("num_windows", 40)
+            _set_if_not_provided("models", list(PROCESSED_STANDARD_MODELS))
+
+    else:  # profile == "full"
+        _set_if_not_provided("horizons", [1, 2, 4])
+        _set_if_not_provided("num_windows", 80)
+        _set_if_not_provided("metric", "RMSE")
+        _set_if_not_provided("models", list(FULL_PROFILE_MODELS))
+
+    _set_if_not_provided("results_dir", _profile_results_dir(covariate_mode=covariate_mode, profile=profile))
+    return profile
 
 
 def _parse_task_horizon(task_name: str) -> int:

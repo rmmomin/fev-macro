@@ -32,6 +32,17 @@ Both scripts write comparable outputs (`summaries.*`, `leaderboard.csv`, `pairwi
 
 Legacy `scripts/run_eval.py` remains available as a thin wrapper.
 
+## Recommended runs
+
+```bash
+make eval-unprocessed-standard
+make eval-processed-standard
+make eval-unprocessed-smoke
+make eval-processed-smoke
+```
+
+Use `--profile full` for overnight/full benchmarks.
+
 ## Why LL vs G differs by covariate mode
 
 - `run_eval_unprocessed.py`: raw FRED-QD covariates pair better with level-style dynamics, so default target is `log_level` and model defaults use trend/level-oriented baselines.
@@ -80,7 +91,7 @@ The harness is designed so models can be added modularly and compared fairly und
 
 ## Model Set And Feature Usage
 
-`scripts/run_eval.py` default full model list:
+`scripts/run_eval.py --profile full` model list:
 
 - `naive_last`
 - `mean`
@@ -524,22 +535,28 @@ Inspect data:
 make inspect-data
 ```
 
-Run default full benchmark:
+Run default profile (`standard`):
 
 ```bash
 make run
 ```
 
-Equivalent direct command (uses default full model list):
+Equivalent direct command:
 
 ```bash
 PYTHONPATH=src .venv/bin/python scripts/run_eval.py
 ```
 
-Default benchmark CLI settings:
+Run full overnight profile:
 
-- `--horizons 1 2 3 4`
-- `--num_windows 100`
+```bash
+PYTHONPATH=src .venv/bin/python scripts/run_eval.py --profile full
+```
+
+Full profile CLI settings:
+
+- `--horizons 1 2 4`
+- `--num_windows 80`
 - `--metric RMSE`
 - `--target_transform saar_growth`
 - `--eval_release_metric realtime_qoq_saar`

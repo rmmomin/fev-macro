@@ -3,7 +3,7 @@ VENV ?= .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
 
-.PHONY: setup inspect-data run report plot download-historical panel-md panel-qd panel-md-processed panel-qd-processed panels panels-processed latest-forecast latest-forecast-processed realtime-oos-processed
+.PHONY: setup inspect-data run report plot download-historical panel-md panel-qd panel-md-processed panel-qd-processed panels panels-processed latest-forecast latest-forecast-processed realtime-oos-processed eval-unprocessed-standard eval-processed-standard eval-unprocessed-smoke eval-processed-smoke eval-unprocessed-full eval-processed-full
 
 setup:
 	$(PYTHON) -m venv $(VENV)
@@ -49,3 +49,21 @@ latest-forecast-processed:
 
 realtime-oos-processed:
 	$(PY) scripts/run_realtime_oos.py --mode processed
+
+eval-unprocessed-standard:
+	$(PY) scripts/run_eval_unprocessed.py --profile standard --results_dir results/unprocessed_standard
+
+eval-processed-standard:
+	$(PY) scripts/run_eval_processed.py --profile standard --results_dir results/processed_standard
+
+eval-unprocessed-smoke:
+	$(PY) scripts/run_eval_unprocessed.py --profile smoke --results_dir results/unprocessed_smoke
+
+eval-processed-smoke:
+	$(PY) scripts/run_eval_processed.py --profile smoke --results_dir results/processed_smoke
+
+eval-unprocessed-full:
+	$(PY) scripts/run_eval_unprocessed.py --profile full --results_dir results/unprocessed_full
+
+eval-processed-full:
+	$(PY) scripts/run_eval_processed.py --profile full --results_dir results/processed_full
