@@ -319,7 +319,17 @@ def run_eval_pipeline(
         if not requested_models:
             raise ValueError("Fast mode removed all selected models; provide at least one non-dropped model.")
 
-    unknown_models = [m for m in requested_models if m not in available_models()]
+    baseline_model = str(getattr(args, "baseline_model", "naive_last") or "naive_last").strip()
+    setattr(args, "baseline_model", baseline_model)
+
+    known_models = set(available_models())
+    if baseline_model not in known_models:
+        raise ValueError(f"Unknown baseline_model: {baseline_model!r}. Available models: {sorted(known_models)}")
+    if baseline_model not in requested_models:
+        requested_models = [*requested_models, baseline_model]
+        print(f"Added baseline model '{baseline_model}' to model run list.")
+
+    unknown_models = [m for m in requested_models if m not in known_models]
     if unknown_models:
         raise ValueError(f"Unknown models: {unknown_models}. Available models: {available_models()}")
 
