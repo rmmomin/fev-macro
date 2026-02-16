@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Literal, Sequence, cast
@@ -197,6 +199,15 @@ def build_eval_arg_parser(
         help="Disable historical-vintage training and use a single finalized dataset for all windows.",
     )
     parser.add_argument(
+        "--allow_snapshot_eval",
+        action="store_true",
+        default=False,
+        help=(
+            "Allows all windows to train on a single finalized snapshot (revision/look-ahead bias). "
+            "Not a real-time simulation. Intended only for debugging."
+        ),
+    )
+    parser.add_argument(
         "--qd_vintage_panel",
         type=str,
         default=default_qd_vintage_panel,
@@ -287,6 +298,20 @@ def run_eval_pipeline(
     mode = _normalize_covariate_mode(covariate_mode)
     args = cli_args
     profile = _apply_profile_defaults(args=args, covariate_mode=mode)
+
+    allow_snapshot_eval = bool(getattr(args, "allow_snapshot_eval", False))
+    disable_historical_vintages = bool(getattr(args, "disable_historical_vintages", False))
+    snapshot_eval = disable_historical_vintages and allow_snapshot_eval
+    if disable_historical_vintages and not allow_snapshot_eval:
+        raise ValueError(
+            "Snapshot evaluation is blocked by default because it trains all windows on one finalized snapshot. "
+            "Recommended: remove --disable_historical_vintages. "
+            "If you intentionally want debug-only snapshot evaluation, add --allow_snapshot_eval."
+        )
+    if snapshot_eval:
+        print("WARNING: SNAPSHOT EVALUATION ENABLED")
+        print("WARNING: All windows will train on a single finalized snapshot.")
+        print("WARNING: This introduces revision/look-ahead bias and is NOT a real-time simulation.")
 
     np.random.seed(int(args.seed))
 
@@ -396,6 +421,8 @@ def run_eval_pipeline(
     all_tasks = []
     task_provider_by_name: dict[str, HistoricalQuarterlyVintageProvider] = {}
     task_meta_by_task_name: dict[str, dict[str, Any]] = {}
+    window_vintage_log: dict[tuple[str, int], dict[str, Any]] = {}
+    provider_source_kinds: set[str] = set()
 
     for stage in stages:
         gdp_df, eval_meta = apply_gdpc1_release_truth_target(
@@ -506,6 +533,7 @@ def run_eval_pipeline(
                 f"{vintage_provider.available_range_str()} ({len(vintage_provider.vintage_periods)} files) "
                 f"from {vintage_provider.historical_qd_dir}"
             )
+            provider_source_kinds.add(vintage_provider.source_kind)
 
             adjusted_tasks = []
             for horizon, task in zip(args.horizons, tasks):
@@ -578,11 +606,19 @@ def run_eval_pipeline(
 
         def past_data_adapter(past_data, future_data, task, window_idx):  # type: ignore[no-redef]
             _ = future_data
-            _ = window_idx
+            task_name = str(getattr(task, "task_name", ""))
+            window_idx_int = int(window_idx)
             provider = task_provider_by_name.get(str(getattr(task, "task_name", "")))
             if provider is None:
                 return past_data
-            return provider.adapt_past_data(past_data=past_data, task=task)
+            adapted = provider.adapt_past_data(past_data=past_data, task=task, return_meta=True)
+            if isinstance(adapted, tuple) and len(adapted) == 2:
+                adapted_past_data, meta = adapted
+            else:
+                adapted_past_data, meta = adapted, {}
+            normalized_meta = _normalize_window_vintage_meta(meta=meta)
+            window_vintage_log[(task_name, window_idx_int)] = normalized_meta
+            return adapted_past_data
 
     models = build_models(model_names=requested_models, seed=int(args.seed))
     if fast_mode:
@@ -621,6 +657,16 @@ def run_eval_pipeline(
         records_df=records_df,
         task_meta_by_task_name=task_meta_by_task_name,
     )
+    records_df = _enrich_prediction_records_with_window_vintages(
+        records_df=records_df,
+        window_vintage_log=window_vintage_log,
+        snapshot_eval=snapshot_eval,
+    )
+    window_vintages_df = _build_window_vintages_table(
+        records_df=records_df,
+        window_vintage_log=window_vintage_log,
+        snapshot_eval=snapshot_eval,
+    )
     validate_y_true_matches_release_table(
         records_df=records_df,
         release_csv_path=args.eval_release_csv,
@@ -630,6 +676,33 @@ def run_eval_pipeline(
 
     predictions_csv = results_dir / "predictions_per_window.csv"
     records_df.to_csv(predictions_csv, index=False)
+    window_vintages_csv = results_dir / "window_vintages.csv"
+    window_vintages_df.to_csv(window_vintages_csv, index=False)
+
+    run_metadata = {
+        "profile": profile,
+        "covariate_mode": mode,
+        "target_transform": target_transform,
+        "disable_historical_vintages": disable_historical_vintages,
+        "allow_snapshot_eval": allow_snapshot_eval,
+        "snapshot_eval": snapshot_eval,
+        "provider_source_kind": sorted(provider_source_kinds) if provider_source_kinds else [],
+        "qd_panel_path": str(Path(args.qd_vintage_panel).expanduser().resolve()),
+        "historical_qd_dir": str(Path(args.historical_qd_dir).expanduser().resolve()),
+        "eval_release_metric": eval_release_metric,
+        "eval_release_stages": stages,
+        "models": requested_models,
+        "baseline_model": baseline_model,
+        "results_dir": str(results_dir),
+    }
+    if covariate_meta:
+        run_metadata["covariate_source"] = covariate_meta.get("source")
+        run_metadata["covariate_selected_vintage"] = covariate_meta.get("selected_vintage")
+    git_commit = _resolve_git_commit_hash()
+    if git_commit:
+        run_metadata["git_commit"] = git_commit
+    run_metadata_path = results_dir / "run_metadata.json"
+    run_metadata_path.write_text(json.dumps(run_metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     kpi_df, kpi_subperiod_df = _compute_kpi_tables(
         records_df=records_df,
@@ -646,6 +719,8 @@ def run_eval_pipeline(
     print(f"Wrote leaderboard: {results_dir / 'leaderboard.csv'}")
     print(f"Wrote pairwise: {results_dir / 'pairwise.csv'}")
     print(f"Wrote prediction records: {predictions_csv}")
+    print(f"Wrote window vintages: {window_vintages_csv}")
+    print(f"Wrote run metadata: {run_metadata_path}")
     print(f"Wrote KPI metrics: {kpi_csv}")
     print(f"Wrote KPI subperiod metrics: {kpi_subperiod_csv}")
 
@@ -697,6 +772,119 @@ def _enrich_prediction_records_with_task_meta(
     for field in TASK_META_FIELDS:
         out[field] = task_meta.map(lambda meta: meta.get(field) if isinstance(meta, dict) else None)
     return out
+
+
+def _normalize_window_vintage_meta(meta: dict[str, Any] | Any) -> dict[str, Any]:
+    if not isinstance(meta, dict):
+        meta = {}
+    return {
+        "train_cutoff_timestamp": str(meta.get("cutoff_timestamp", "") or ""),
+        "train_vintage": str(meta.get("selected_vintage", "") or ""),
+        "train_vintage_source": str(meta.get("source_kind", "") or ""),
+        "strict_mode": bool(meta.get("strict_mode", False)),
+        "fallback_to_earliest": bool(meta.get("fallback_to_earliest", False)),
+    }
+
+
+def _enrich_prediction_records_with_window_vintages(
+    records_df: pd.DataFrame,
+    window_vintage_log: dict[tuple[str, int], dict[str, Any]],
+    snapshot_eval: bool,
+) -> pd.DataFrame:
+    out = records_df.copy()
+    if "task_name" not in out.columns or "window_idx" not in out.columns:
+        out["train_vintage"] = pd.Series(index=out.index, dtype=object)
+        out["train_vintage_source"] = pd.Series(index=out.index, dtype=object)
+        out["train_cutoff_timestamp"] = pd.Series(index=out.index, dtype=object)
+        return out
+
+    task_name = out["task_name"].astype(str)
+    window_idx = pd.to_numeric(out["window_idx"], errors="coerce").fillna(-1).astype(int)
+    keys = list(zip(task_name, window_idx))
+
+    default_meta = {
+        "train_cutoff_timestamp": "",
+        "train_vintage": "snapshot_finalized" if snapshot_eval else "",
+        "train_vintage_source": "single_snapshot" if snapshot_eval else "",
+    }
+    mapped = [window_vintage_log.get(k, default_meta) for k in keys]
+    out["train_vintage"] = [str(m.get("train_vintage", "") or "") for m in mapped]
+    out["train_vintage_source"] = [str(m.get("train_vintage_source", "") or "") for m in mapped]
+    out["train_cutoff_timestamp"] = [str(m.get("train_cutoff_timestamp", "") or "") for m in mapped]
+    return out
+
+
+def _build_window_vintages_table(
+    records_df: pd.DataFrame,
+    window_vintage_log: dict[tuple[str, int], dict[str, Any]],
+    snapshot_eval: bool,
+) -> pd.DataFrame:
+    columns = [
+        "task_name",
+        "window_idx",
+        "train_cutoff_timestamp",
+        "train_vintage",
+        "train_vintage_source",
+        "strict_mode",
+        "fallback_to_earliest",
+    ]
+    rows: list[dict[str, Any]] = []
+
+    for (task_name, window_idx), meta in sorted(window_vintage_log.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        rows.append(
+            {
+                "task_name": str(task_name),
+                "window_idx": int(window_idx),
+                "train_cutoff_timestamp": str(meta.get("train_cutoff_timestamp", "") or ""),
+                "train_vintage": str(meta.get("train_vintage", "") or ""),
+                "train_vintage_source": str(meta.get("train_vintage_source", "") or ""),
+                "strict_mode": bool(meta.get("strict_mode", False)),
+                "fallback_to_earliest": bool(meta.get("fallback_to_earliest", False)),
+            }
+        )
+
+    if "task_name" in records_df.columns and "window_idx" in records_df.columns:
+        seen = {(str(r["task_name"]), int(r["window_idx"])) for r in rows}
+        unique_windows = (
+            records_df[["task_name", "window_idx"]]
+            .dropna(subset=["task_name", "window_idx"])
+            .drop_duplicates()
+            .copy()
+        )
+        unique_windows["task_name"] = unique_windows["task_name"].astype(str)
+        unique_windows["window_idx"] = pd.to_numeric(unique_windows["window_idx"], errors="coerce").fillna(-1).astype(int)
+        for _, row in unique_windows.iterrows():
+            key = (str(row["task_name"]), int(row["window_idx"]))
+            if key in seen:
+                continue
+            rows.append(
+                {
+                    "task_name": key[0],
+                    "window_idx": key[1],
+                    "train_cutoff_timestamp": "",
+                    "train_vintage": "snapshot_finalized" if snapshot_eval else "",
+                    "train_vintage_source": "single_snapshot" if snapshot_eval else "",
+                    "strict_mode": False,
+                    "fallback_to_earliest": False,
+                }
+            )
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    out = pd.DataFrame(rows)
+    out = out.sort_values(["task_name", "window_idx"], kind="stable").reset_index(drop=True)
+    return out[columns]
+
+
+def _resolve_git_commit_hash() -> str:
+    try:
+        return (
+            subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True, stderr=subprocess.DEVNULL)
+            .strip()
+        )
+    except Exception:
+        return ""
 
 
 def validate_y_true_matches_release_table(
@@ -1106,12 +1294,10 @@ def _apply_profile_defaults(args: argparse.Namespace, covariate_mode: CovariateM
         _set_if_not_provided("num_windows", 10)
         _set_if_not_provided("metric", "RMSE")
         _set_if_not_provided("models", list(SMOKE_PROFILE_MODELS))
-        _set_if_not_provided("disable_historical_vintages", True)
 
     elif profile == "standard":
         _set_if_not_provided("horizons", [1, 2, 4])
         _set_if_not_provided("metric", "RMSE")
-        _set_if_not_provided("disable_historical_vintages", True)
         if covariate_mode == "unprocessed":
             _set_if_not_provided("target_transform", "log_level")
             _set_if_not_provided("num_windows", 60)

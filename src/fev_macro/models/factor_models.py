@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from datasets import Dataset
 
+from ..data import extract_past_cutoff_timestamp
 from .base import BaseModel, get_history_by_item, get_item_order, get_task_horizon, get_task_id_column, to_prediction_dataset
 from .random_forest import _drift_fallback, _rows_by_item, _to_numeric_array
 
@@ -181,6 +182,7 @@ class MixedFrequencyDFMModel(BaseModel):
         n_factors: int = 6,
         max_lag: int = 2,
         alpha: float = 1.0,
+        fallback_to_earliest: bool = True,
         excluded_years: tuple[int, ...] = (),
         seed: int = 0,
     ) -> None:
@@ -191,6 +193,7 @@ class MixedFrequencyDFMModel(BaseModel):
         self.n_factors = int(n_factors)
         self.max_lag = int(max_lag)
         self.alpha = float(alpha)
+        self.fallback_to_earliest = bool(fallback_to_earliest)
         self.excluded_years = tuple(sorted({int(y) for y in excluded_years}))
         self.seed = int(seed)
 
@@ -205,33 +208,61 @@ class MixedFrequencyDFMModel(BaseModel):
         self._ridge_cls = Ridge
         self._scaler_cls = StandardScaler
 
-        self._quarter_panel = _load_fred_md_quarter_panel(
-            dataset_path=self.md_dataset_path,
-            config=self.md_config,
-            max_covariates=self.max_monthly_covariates,
-            excluded_years=self.excluded_years,
-        )
-
     def predict(self, past_data: Dataset, future_data: Dataset, task: Any) -> Dataset:
         horizon = get_task_horizon(task)
         item_order = get_item_order(future_data, task)
         history = get_history_by_item(past_data, task)
+
+        quarter_panel: np.ndarray | None = None
+        try:
+            cutoff_ts = extract_past_cutoff_timestamp(past_data=past_data, task=task)
+            cutoff_period = pd.Period(pd.Timestamp(cutoff_ts), freq="M")
+            quarter_panel, _ = _load_fred_md_quarter_panel_for_cutoff(
+                dataset_path=self.md_dataset_path,
+                config=self.md_config,
+                max_covariates=self.max_monthly_covariates,
+                excluded_years=self.excluded_years,
+                cutoff_period=cutoff_period,
+                fallback_to_earliest=self.fallback_to_earliest,
+            )
+            if quarter_panel is None:
+                print(
+                    "[mixed_freq_dfm_md] WARNING: no panel vintage available at-or-before cutoff "
+                    f"{cutoff_period}; falling back to drift forecast."
+                )
+        except Exception as exc:
+            print(
+                "[mixed_freq_dfm_md] WARNING: unable to determine per-window cutoff timestamp "
+                f"({exc}); falling back to drift forecast."
+            )
+            quarter_panel = None
 
         preds: dict[Any, np.ndarray] = {}
         for item_id in item_order:
             y = np.asarray(history[item_id], dtype=float)
             if y.size == 0:
                 raise ValueError(f"No history available for item_id={item_id}")
-
-            preds[item_id] = self._forecast_one(y=y, horizon=horizon)
+            if quarter_panel is None:
+                preds[item_id] = _drift_fallback(y, horizon=horizon)
+            else:
+                preds[item_id] = self._forecast_one(
+                    y=y,
+                    horizon=horizon,
+                    quarter_panel=quarter_panel,
+                )
 
         return to_prediction_dataset(preds, item_order)
 
-    def _forecast_one(self, y: np.ndarray, horizon: int) -> np.ndarray:
+    def _forecast_one(
+        self,
+        y: np.ndarray,
+        horizon: int,
+        quarter_panel: np.ndarray,
+    ) -> np.ndarray:
         if y.size < 20:
             return _drift_fallback(y, horizon=horizon)
 
-        F = _slice_quarter_factors(self._quarter_panel, required_length=y.size + horizon)
+        F = _slice_quarter_factors(quarter_panel, required_length=y.size + horizon)
         F_past = F[: y.size]
         F_future = F[y.size : y.size + horizon]
 
@@ -319,13 +350,24 @@ def _extend_covariates(
 
 
 @lru_cache(maxsize=4)
-def _load_fred_md_quarter_panel(
+def _load_fred_md_panel_cached(
     dataset_path: str,
-    config: str,
-    max_covariates: int,
-    excluded_years: tuple[int, ...],
-) -> np.ndarray:
-    _ = config
+) -> pd.DataFrame:
+    panel_path = _resolve_md_panel_path(dataset_path=dataset_path)
+    panel = pd.read_parquet(panel_path)
+    required_cols = {"timestamp", "vintage"}
+    missing = sorted(required_cols.difference(panel.columns))
+    if missing:
+        raise ValueError(f"Vintage panel missing required columns {missing}: {panel_path}")
+
+    work = panel.copy()
+    work["timestamp"] = pd.to_datetime(work["timestamp"], errors="coerce")
+    work["vintage"] = work["vintage"].astype(str)
+    work = work.dropna(subset=["timestamp", "vintage"]).sort_values(["vintage", "timestamp"]).reset_index(drop=True)
+    return work
+
+
+def _resolve_md_panel_path(dataset_path: str) -> Path:
     panel_path = Path(dataset_path).expanduser().resolve()
     if not panel_path.exists() and panel_path.name.endswith("_processed.parquet"):
         legacy_path = panel_path.with_name(panel_path.name.replace("_processed.parquet", "_process.parquet"))
@@ -336,22 +378,74 @@ def _load_fred_md_quarter_panel(
             f"Local vintage panel not found for mixed_freq_dfm_md: {panel_path}. "
             "Set md_dataset_path to a local parquet panel."
         )
+    return panel_path
 
-    panel = pd.read_parquet(panel_path)
-    required_cols = {"timestamp", "vintage"}
-    missing = sorted(required_cols.difference(panel.columns))
-    if missing:
-        raise ValueError(f"Vintage panel missing required columns {missing}: {panel_path}")
 
-    work = panel.copy()
-    work["timestamp"] = pd.to_datetime(work["timestamp"], errors="coerce")
-    work["vintage"] = work["vintage"].astype(str)
-    work = work.dropna(subset=["timestamp", "vintage"]).sort_values(["vintage", "timestamp"])
-    if work.empty:
+def _load_fred_md_quarter_panel_for_cutoff(
+    dataset_path: str,
+    config: str,
+    max_covariates: int,
+    excluded_years: tuple[int, ...],
+    cutoff_period: pd.Period,
+    fallback_to_earliest: bool,
+) -> tuple[np.ndarray | None, str]:
+    _ = config
+    panel = _load_fred_md_panel_cached(dataset_path=dataset_path)
+    if panel.empty:
+        return None, ""
+
+    selected_vintage = _select_md_vintage_for_cutoff(
+        panel=panel,
+        cutoff_period=cutoff_period,
+        fallback_to_earliest=fallback_to_earliest,
+    )
+    if selected_vintage is None:
+        return None, ""
+
+    quarter_panel = _load_fred_md_quarter_panel_for_vintage(
+        dataset_path=dataset_path,
+        max_covariates=max_covariates,
+        excluded_years=excluded_years,
+        selected_vintage=selected_vintage,
+    )
+    return quarter_panel, selected_vintage
+
+
+def _select_md_vintage_for_cutoff(
+    panel: pd.DataFrame,
+    cutoff_period: pd.Period,
+    fallback_to_earliest: bool,
+) -> str | None:
+    vintage_labels = sorted(set(map(str, panel["vintage"].tolist())))
+    vintage_periods: list[tuple[pd.Period, str]] = []
+    for label in vintage_labels:
+        try:
+            vintage_periods.append((pd.Period(label, freq="M"), label))
+        except Exception:
+            continue
+
+    if not vintage_periods:
+        return None
+
+    eligible = [pair for pair in vintage_periods if pair[0] <= cutoff_period]
+    if eligible:
+        return max(eligible, key=lambda pair: pair[0])[1]
+    if fallback_to_earliest:
+        return min(vintage_periods, key=lambda pair: pair[0])[1]
+    return None
+
+
+@lru_cache(maxsize=64)
+def _load_fred_md_quarter_panel_for_vintage(
+    dataset_path: str,
+    max_covariates: int,
+    excluded_years: tuple[int, ...],
+    selected_vintage: str,
+) -> np.ndarray:
+    panel = _load_fred_md_panel_cached(dataset_path=dataset_path)
+    latest = panel.loc[panel["vintage"] == str(selected_vintage)].copy()
+    if latest.empty:
         return np.zeros((1, 1), dtype=float)
-
-    latest_vintage = sorted(work["vintage"].unique())[-1]
-    latest = work.loc[work["vintage"] == latest_vintage].copy()
 
     drop_cols = {"timestamp", "vintage", "vintage_timestamp", "GDPC1"}
     candidate_cols = [c for c in latest.columns if c not in drop_cols]

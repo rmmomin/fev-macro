@@ -3,7 +3,7 @@ VENV ?= .venv
 PIP := $(VENV)/bin/pip
 PY := $(VENV)/bin/python
 
-.PHONY: setup download-historical panel-qd panel-md panel-qd-processed panel-md-processed build-gdp-releases eval-unprocessed-standard eval-processed-standard realtime-oos-processed fetch-latest process-latest latest-forecast-processed plot-2025q4 eval-unprocessed-smoke eval-processed-smoke eval-unprocessed-full eval-processed-full
+.PHONY: setup download-historical panel-qd panel-md panel-qd-processed panel-md-processed build-gdp-releases eval-unprocessed-standard eval-processed-standard eval-processed-snapshot realtime-oos-processed fetch-latest process-latest latest-forecast-processed plot-2025q4 eval-unprocessed-smoke eval-processed-smoke eval-unprocessed-full eval-processed-full
 
 setup:
 	$(PYTHON) -m venv $(VENV)
@@ -33,6 +33,9 @@ eval-unprocessed-standard:
 
 eval-processed-standard:
 	$(PY) scripts/run_eval_processed.py --profile standard --results_dir results/processed_standard
+
+eval-processed-snapshot:
+	$(PY) scripts/run_eval_processed.py --profile smoke --disable_historical_vintages --allow_snapshot_eval --results_dir results/processed_snapshot_debug
 
 realtime-oos-processed:
 	$(PY) scripts/run_realtime_oos.py --mode processed --select_models_from_leaderboard

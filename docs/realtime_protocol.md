@@ -32,6 +32,7 @@ Validation report (`data/panels/gdpc1_release_validation_report.csv`) flags:
 Optional `--fail_on_validate` exits nonzero when spike flags are present.
 
 ## Leakage policy
+- **Default behavior is vintage-correct rolling windows. Snapshot evaluation is blocked unless both `--disable_historical_vintages` and `--allow_snapshot_eval` are passed explicitly (debug-only).**
 - Training windows use only historically available vintages.
 - Truth comes from release-stage realtime SAAR columns.
 - If realtime SAAR truth columns are missing, code emits loud warnings before fallback behavior.

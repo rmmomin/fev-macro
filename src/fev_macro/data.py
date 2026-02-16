@@ -426,6 +426,10 @@ class HistoricalQuarterlyVintageProvider:
     def latest_vintage(self) -> pd.Period:
         return self.vintage_periods[-1]
 
+    @property
+    def source_kind(self) -> str:
+        return "panel_parquet" if self._uses_panel_source else "historical_csv"
+
     def available_range_str(self) -> str:
         return f"{self.earliest_vintage}..{self.latest_vintage}"
 
@@ -490,7 +494,12 @@ class HistoricalQuarterlyVintageProvider:
                 break
         return trailing
 
-    def adapt_past_data(self, past_data: Dataset, task: Any) -> Dataset:
+    def adapt_past_data(
+        self,
+        past_data: Dataset,
+        task: Any,
+        return_meta: bool = False,
+    ) -> Dataset | tuple[Dataset, dict[str, Any]]:
         """Return a past_data Dataset reconstructed from the matching historical vintage."""
         id_col = _task_id_column(task)
         ts_col = _task_timestamp_column(task)
@@ -498,6 +507,9 @@ class HistoricalQuarterlyVintageProvider:
         required_covars = _task_covariate_columns(task)
 
         rows: list[dict[str, Any]] = []
+        meta_cutoff: str = ""
+        meta_vintage: str = ""
+        meta_used_fallback = False
         for rec in past_data:
             ts_reindexed = pd.to_datetime(pd.Series(rec.get(ts_col, [])), errors="coerce")
             ts_reindexed = ts_reindexed.dropna().reset_index(drop=True)
@@ -517,6 +529,13 @@ class HistoricalQuarterlyVintageProvider:
                     "No historical FRED-QD vintage available for cutoff "
                     f"{cutoff.date()} (earliest vintage is {self.earliest_vintage})."
                 )
+            cutoff_period = pd.Period(cutoff, freq="M")
+            used_fallback = selected > cutoff_period
+            if not meta_cutoff:
+                meta_cutoff = cutoff.isoformat()
+            if not meta_vintage:
+                meta_vintage = str(selected)
+            meta_used_fallback = meta_used_fallback or bool(used_fallback)
 
             vintage_df = self._load_vintage_frame(vintage_period=selected)
             vintage_hist = vintage_df.loc[vintage_df["timestamp"] <= cutoff].copy()
@@ -552,7 +571,19 @@ class HistoricalQuarterlyVintageProvider:
         if not rows:
             raise ValueError("HistoricalQuarterlyVintageProvider produced an empty past_data dataset")
 
-        return Dataset.from_list(rows)
+        adapted = Dataset.from_list(rows)
+        if not return_meta:
+            return adapted
+
+        meta = {
+            "cutoff_timestamp": meta_cutoff,
+            "selected_vintage": meta_vintage,
+            "source_kind": self.source_kind,
+            "strict_mode": bool(self.strict),
+            "fallback_to_earliest": bool(self.fallback_to_earliest),
+            "used_earliest_fallback": bool(meta_used_fallback),
+        }
+        return adapted, meta
 
     def _load_vintage_frame(self, vintage_period: pd.Period) -> pd.DataFrame:
         if vintage_period in self._cache:
@@ -1068,7 +1099,7 @@ def _task_covariate_columns(task: Any) -> list[str]:
     return list(dict.fromkeys([str(c) for c in [*past, *known]]))
 
 
-def _extract_past_cutoff_timestamp(past_data: Dataset, task: Any) -> pd.Timestamp:
+def extract_past_cutoff_timestamp(past_data: Dataset, task: Any) -> pd.Timestamp:
     ts_col = _task_timestamp_column(task)
     if len(past_data) == 0:
         raise ValueError("past_data is empty; cannot extract cutoff timestamp")
@@ -1080,6 +1111,10 @@ def _extract_past_cutoff_timestamp(past_data: Dataset, task: Any) -> pd.Timestam
         raise ValueError("past_data has no valid timestamps")
 
     return pd.Timestamp(ts.iloc[-1])
+
+
+def _extract_past_cutoff_timestamp(past_data: Dataset, task: Any) -> pd.Timestamp:
+    return extract_past_cutoff_timestamp(past_data=past_data, task=task)
 
 
 def _autodiscover_historical_qd_dir(preferred: Path) -> Path | None:

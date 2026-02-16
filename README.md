@@ -35,7 +35,7 @@ Core baselines and multivariate models include `naive_last`, `mean`, `drift`, `a
 Full model catalog: [`docs/models.md`](docs/models.md)
 
 ## Real-time evaluation policy
-Evaluation is always scored against release-consistent q/q SAAR GDP truth from `data/panels/gdpc1_releases_first_second_third.csv`, using `qoq_saar_growth_realtime_first_pct`, `qoq_saar_growth_realtime_second_pct`, and `qoq_saar_growth_realtime_third_pct` when available. For each quarter/release stage, realtime truth is built from one as-of panel vintage to avoid revised-history leakage from mixed-vintage denominators around reindex/rebenchmark events. Protocol details: [`docs/realtime_protocol.md`](docs/realtime_protocol.md).
+**By default, every rolling window trains on an as-of vintage (vintage-correct). Snapshot evaluation is blocked unless you explicitly pass `--allow_snapshot_eval`.** Evaluation is always scored against release-consistent q/q SAAR GDP truth from `data/panels/gdpc1_releases_first_second_third.csv`, using `qoq_saar_growth_realtime_first_pct`, `qoq_saar_growth_realtime_second_pct`, and `qoq_saar_growth_realtime_third_pct` when available. For each quarter/release stage, realtime truth is built from one as-of panel vintage to avoid revised-history leakage from mixed-vintage denominators around reindex/rebenchmark events. Protocol details: [`docs/realtime_protocol.md`](docs/realtime_protocol.md).
 
 ## Latest-vintage one-shot forecast + 2025Q4 comparison
 ```bash
