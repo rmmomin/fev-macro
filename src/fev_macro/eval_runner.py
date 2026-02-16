@@ -54,7 +54,6 @@ FULL_PROFILE_MODELS: list[str] = [
     "factor_pca_qd",
     "mixed_freq_dfm_md",
     "ensemble_avg_top3",
-    "ensemble_weighted_top5",
     "auto_arima",
     "chronos2",
 ]
@@ -1232,7 +1231,7 @@ def _select_covariate_columns(frame: pd.DataFrame, target_col: str, max_covariat
 
 def _apply_fast_mode_model_list(model_names: Sequence[str]) -> tuple[list[str], list[str]]:
     # Keep speed-focused defaults by dropping known-heavy models.
-    drop_set = {"chronos2", "ensemble_avg_top3", "ensemble_weighted_top5"}
+    drop_set = {"chronos2", "ensemble_avg_top3"}
     kept: list[str] = []
     dropped: list[str] = []
     for name in model_names:

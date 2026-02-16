@@ -6,9 +6,8 @@ import numpy as np
 from datasets import Dataset
 
 from .base import BaseModel, get_item_order, to_prediction_dataset
-from .baselines import Drift, NaiveLast, SeasonalNaive
-from .factor_models import QuarterlyFactorPCAModel
-from .state_space import LocalTrendStateSpaceModel
+from .baselines import Mean, NaiveLast
+from .random_forest import RandomForestModel
 from .statsforecast_models import AutoARIMAModel
 
 
@@ -72,21 +71,8 @@ class SimpleEnsembleModel(BaseModel):
 class EnsembleAvgTop3Model(SimpleEnsembleModel):
     def __init__(self) -> None:
         members = [
-            Drift(),
+            Mean(),
+            RandomForestModel(seed=0),
             AutoARIMAModel(season_length=4),
-            LocalTrendStateSpaceModel(include_cycle=True),
         ]
         super().__init__(name="ensemble_avg_top3", members=members)
-
-
-class EnsembleWeightedTop5Model(SimpleEnsembleModel):
-    def __init__(self) -> None:
-        members = [
-            Drift(),
-            AutoARIMAModel(season_length=4),
-            LocalTrendStateSpaceModel(include_cycle=True),
-            QuarterlyFactorPCAModel(max_covariates=60, n_factors=4, max_lag=3, alpha=0.8),
-            SeasonalNaive(season_length=4),
-        ]
-        weights = [0.28, 0.25, 0.20, 0.17, 0.10]
-        super().__init__(name="ensemble_weighted_top5", members=members, weights=weights)

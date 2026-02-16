@@ -19,7 +19,6 @@ MODELS_LL_UNPROCESSED: list[str] = [
     "mixed_freq_dfm_md",
     "chronos2",
     "ensemble_avg_top3",
-    "ensemble_weighted_top5",
 ]
 
 MODELS_G_PROCESSED: list[str] = [
@@ -35,7 +34,6 @@ MODELS_G_PROCESSED: list[str] = [
     "factor_pca_qd",
     "mixed_freq_dfm_md",
     "ensemble_avg_top3",
-    "ensemble_weighted_top5",
 ]
 
 SUPPORTED_MODEL_SETS = {"auto", "ll", "g"}
