@@ -1,0 +1,51 @@
+{
+  "dropped_realtime_models": [],
+  "eligible_models": [
+    "xgboost",
+    "mean",
+    "theta",
+    "ar4",
+    "bvar_minnesota_growth_8",
+    "factor_pca_qd",
+    "auto_arima",
+    "bvar_minnesota_growth_20",
+    "auto_ets"
+  ],
+  "eligible_models_realtime": [
+    "xgboost_growth",
+    "mean_growth",
+    "theta_growth",
+    "ar4",
+    "bvar_minnesota_growth_8",
+    "factor_pca_qd_growth",
+    "auto_arima_growth",
+    "bvar_minnesota_growth_20",
+    "auto_ets_growth"
+  ],
+  "skill_column_used": "skill_score",
+  "threshold": 0.18,
+  "top3_models": [
+    "xgboost",
+    "mean",
+    "theta"
+  ],
+  "top3_models_realtime": [
+    "xgboost_growth",
+    "mean_growth",
+    "theta_growth"
+  ],
+  "top5_models": [
+    "xgboost",
+    "mean",
+    "theta",
+    "ar4",
+    "bvar_minnesota_growth_8"
+  ],
+  "top5_models_realtime": [
+    "xgboost_growth",
+    "mean_growth",
+    "theta_growth",
+    "ar4",
+    "bvar_minnesota_growth_8"
+  ]
+}

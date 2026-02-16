@@ -95,6 +95,7 @@ The harness is designed so models can be added modularly and compared fairly und
 
 - `naive_last`
 - `mean`
+- `ar4`
 - `drift`
 - `seasonal_naive`
 - `random_normal`
@@ -110,6 +111,8 @@ The harness is designed so models can be added modularly and compared fairly und
 - `ensemble_avg_top3`
 - `ensemble_weighted_top5`
 - `auto_arima`
+- `nyfed_nowcast_mqdfm`
+- `ecb_nowcast_mqdfm`
 - `chronos2`
 
 ### Model summary
@@ -119,6 +122,7 @@ The harness is designed so models can be added modularly and compared fairly und
 | `naive_last` | Random-walk/last-observation baseline | Target history only |
 | `rw_drift_log` | Log-space random walk with constant drift, exponentiated back to levels | Target history only (requires strictly positive levels) |
 | `mean` | Historical mean baseline | Target history only |
+| `ar4` | Univariate autoregression with 4 lags (`AutoReg`) | Target history only; naive last-value fallback if data is too short or fitting fails |
 | `drift` | Linear drift from first to last point | Target history only |
 | `seasonal_naive` | Seasonal repeat (quarterly season length = 4) | Target history only |
 | `random_normal` | Gaussian random forecast from in-sample moments | Target history only |
@@ -133,6 +137,8 @@ The harness is designed so models can be added modularly and compared fairly und
 | `bvar_minnesota_20` | Minnesota-style shrinkage BVAR (~20 total vars including GDP) | Target + selected macro covariates (~19) from FRED-QD |
 | `factor_pca_qd` | Quarterly PCA factor regression | Target lags + PCA factors from up to ~80 FRED-QD covariates |
 | `mixed_freq_dfm_md` | Mixed-frequency factor model using local vintage-panel covariates | Target lags + factors from latest local processed MD vintage panel (`data/panels/fred_md_vintage_panel_processed.parquet`) |
+| `nyfed_nowcast_mqdfm` | NY Fed Staff Nowcast-inspired mixed-frequency block DFM (`DynamicFactorMQ`) | Monthly/quarterly inputs from vintage panels (default unprocessed MD/QD panel paths); if coverage/fit is insufficient, degrades to naive last-value fallback |
+| `ecb_nowcast_mqdfm` | ECB nowcasting-toolbox-inspired mixed-frequency DFM variant (`DynamicFactorMQ`) | Monthly/quarterly inputs from vintage panels (default unprocessed MD/QD panel paths); if coverage/fit is insufficient, degrades to naive last-value fallback |
 | `chronos2` | Zero-shot Chronos-2 foundation model adapter | Target history + available dynamic covariates passed as context/future known covariates |
 | `ensemble_avg_top3` | Equal-weight ensemble | Drift + AutoARIMA + LocalTrendSSM predictions |
 | `ensemble_weighted_top5` | Weighted ensemble | Drift + AutoARIMA + LocalTrendSSM + FactorPCAQD + SeasonalNaive predictions |
@@ -142,6 +148,25 @@ Notes:
 - Models that use covariates consume all available task dynamic columns unless a model-specific cap/selection is applied.
 - `rw_drift_log` and `ar4_growth` are defined in the realtime OOS module and are used by `scripts/run_realtime_oos.py` and `scripts/run_latest_vintage_forecast.py`.
 - Registered but not in the default run list: `auto_ets`, `theta`.
+
+## Nowcasting model variants (NY Fed / ECB-inspired)
+
+Nowcasting frameworks are typically mixed-frequency state-space/factor systems that operate on ragged-edge panels and release-calendar timing (what is and is not published at each nowcast update date).
+
+This repo includes **nowcasting-inspired variants** implemented inside the same benchmark harness:
+
+- `nyfed_nowcast_mqdfm`: inspired by the NY Fed Staff Nowcast FRED specification and block structure, but implemented here via `statsmodels` `DynamicFactorMQ`.
+- `ecb_nowcast_mqdfm`: inspired by the ECB nowcasting toolbox style (DFM/bridge-equation workflow mindset), but implemented here as a generic toolbox-style `DynamicFactorMQ` variant over available panel inputs.
+
+These are **approximations for benchmarking**, not reproductions of official NY Fed or ECB nowcast workflows.
+
+### Data shortcomings / why results may be less informative
+
+- NY Fed Nowcast variant limitation: the NY Fed FRED specification includes many FRED series that are not present in fixed FRED-MD/FRED-QD template panels (for example regional Fed surveys and some labor inputs such as JOLTS/ADP), so those inputs are missing unless explicitly added.
+- NY Fed Nowcast variant limitation: true nowcasting is release-calendar aware (ragged edge + publication lags), while these panels are primarily monthly snapshot vintages and do not fully encode intra-month release timing; this can reduce nowcast informational advantage.
+- ECB toolbox variant limitation: the ECB toolbox is designed around Euro Area nowcasting datasets (Eurostat/ECB SDW/national sources) with structured release calendars, which US-focused FRED-MD/FRED-QD panels do not provide.
+- ECB toolbox variant limitation: without EA-specific inputs, vintages, and release timing, this implementation should be interpreted only as an ECB-inspired DFM-style algorithmic variant, not "the ECB model."
+- Global sufficiency statement: FRED-MD/FRED-QD vintage panels are sufficient for generic factor/DFM benchmarks and nowcasting-inspired models, but not sufficient to faithfully reproduce NY Fed or ECB nowcast workflows because key series can be missing and release-calendar real-time ragged-edge structure is simplified.
 
 ## Real-Time Data Policy: Training vs Testing
 

@@ -25,6 +25,7 @@ MODELS_LL_UNPROCESSED: list[str] = [
 MODELS_G_PROCESSED: list[str] = [
     "naive_last",
     "mean",
+    "ar4",
     "auto_arima",
     "local_trend_ssm",
     "random_forest",
@@ -33,6 +34,8 @@ MODELS_G_PROCESSED: list[str] = [
     "bvar_minnesota_growth_20",
     "factor_pca_qd",
     "mixed_freq_dfm_md",
+    "nyfed_nowcast_mqdfm",
+    "ecb_nowcast_mqdfm",
     "ensemble_avg_top3",
     "ensemble_weighted_top5",
 ]

@@ -38,6 +38,7 @@ PROFILE_CHOICES: tuple[Profile, ...] = ("smoke", "standard", "full")
 FULL_PROFILE_MODELS: list[str] = [
     "naive_last",
     "mean",
+    "ar4",
     "drift",
     "seasonal_naive",
     "random_normal",
@@ -53,6 +54,8 @@ FULL_PROFILE_MODELS: list[str] = [
     "ensemble_avg_top3",
     "ensemble_weighted_top5",
     "auto_arima",
+    "nyfed_nowcast_mqdfm",
+    "ecb_nowcast_mqdfm",
     "chronos2",
 ]
 
@@ -79,12 +82,15 @@ UNPROCESSED_STANDARD_MODELS: list[str] = [
 PROCESSED_STANDARD_MODELS: list[str] = [
     "naive_last",
     "mean",
+    "ar4",
     "auto_arima",
     "local_trend_ssm",
     "random_forest",
     "xgboost",
     "factor_pca_qd",
     "mixed_freq_dfm_md",
+    "nyfed_nowcast_mqdfm",
+    "ecb_nowcast_mqdfm",
 ]
 
 TASK_META_FIELDS: tuple[str, ...] = (

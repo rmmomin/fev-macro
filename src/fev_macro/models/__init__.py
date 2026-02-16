@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from .ar_models import AR4Model
 from .base import BaseModel
 from .baselines import Drift, Mean, NaiveLast, SeasonalNaive
 from .bvar_minnesota import (
@@ -13,6 +14,7 @@ from .bvar_minnesota import (
 from .chronos2 import Chronos2Model
 from .ensemble import EnsembleAvgTop3Model, EnsembleWeightedTop5Model
 from .factor_models import MixedFrequencyDFMModel, QuarterlyFactorPCAModel
+from .nowcast_factor_models import ECBNowcastMQDFMModel, NYFedNowcastMQDFMModel
 from .random_forest import RandomForestModel
 from .randoms import RandomNormal, RandomPermutation, RandomUniform
 from .state_space import LocalTrendStateSpaceModel
@@ -33,6 +35,7 @@ def _no_seed(factory: Callable[[], BaseModel]) -> ModelBuilder:
 MODEL_REGISTRY: dict[str, ModelBuilder] = {
     "naive_last": _no_seed(NaiveLast),
     "mean": _no_seed(Mean),
+    "ar4": _no_seed(AR4Model),
     "drift": _no_seed(Drift),
     "seasonal_naive": _no_seed(lambda: SeasonalNaive(season_length=4)),
     "random_normal": lambda seed: RandomNormal(seed=seed),
@@ -52,6 +55,28 @@ MODEL_REGISTRY: dict[str, ModelBuilder] = {
     "auto_arima": _no_seed(lambda: AutoARIMAModel(season_length=4)),
     "auto_ets": _no_seed(lambda: AutoETSModel(season_length=4)),
     "theta": _no_seed(lambda: ThetaModel(season_length=4)),
+    "nyfed_nowcast_mqdfm": _no_seed(
+        lambda: NYFedNowcastMQDFMModel(
+            md_vintage_panel_path="data/panels/fred_md_vintage_panel.parquet",
+            qd_vintage_panel_path="data/panels/fred_qd_vintage_panel.parquet",
+            include_other_quarterlies=False,
+            min_monthly_vars=16,
+            factor_orders=1,
+            idiosyncratic_ar1=False,
+            max_em_iter=30,
+        )
+    ),
+    "ecb_nowcast_mqdfm": _no_seed(
+        lambda: ECBNowcastMQDFMModel(
+            md_vintage_panel_path="data/panels/fred_md_vintage_panel.parquet",
+            qd_vintage_panel_path="data/panels/fred_qd_vintage_panel.parquet",
+            factors=1,
+            factor_orders=1,
+            max_em_iter=30,
+            max_monthly_vars=24,
+            min_non_missing=24,
+        )
+    ),
     "chronos2": _no_seed(lambda: Chronos2Model(device_map="cpu")),
 }
 

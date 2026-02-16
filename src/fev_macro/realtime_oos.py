@@ -1837,27 +1837,45 @@ def apply_model_runtime_options(
     model_list: Sequence[BaseModel],
     *,
     md_panel_path: str | Path | None = None,
+    qd_panel_path: str | Path | None = None,
     mixed_freq_excluded_years: Sequence[int] | None = None,
 ) -> None:
     md_path = Path(md_panel_path).expanduser().resolve() if md_panel_path else None
+    qd_path = Path(qd_panel_path).expanduser().resolve() if qd_panel_path else None
     excluded_years = tuple(sorted({int(y) for y in (mixed_freq_excluded_years or [])}))
+
+    def _apply_to_model_object(model_obj: object) -> None:
+        if md_path is not None:
+            for attr in ("md_panel_path", "md_dataset_path", "md_vintage_panel_path"):
+                if hasattr(model_obj, attr):
+                    setattr(model_obj, attr, Path(md_path))
+
+            if hasattr(model_obj, "_panel"):
+                setattr(model_obj, "_panel", None)
+            if hasattr(model_obj, "_cache_quarterly"):
+                setattr(model_obj, "_cache_quarterly", {})
+
+        if qd_path is not None and hasattr(model_obj, "qd_vintage_panel_path"):
+            setattr(model_obj, "qd_vintage_panel_path", Path(qd_path))
+
+        if hasattr(model_obj, "excluded_years"):
+            setattr(model_obj, "excluded_years", excluded_years)
+            if hasattr(model_obj, "_cache_quarterly"):
+                setattr(model_obj, "_cache_quarterly", {})
+
+        if hasattr(model_obj, "reload_vintage_panels"):
+            try:
+                model_obj.reload_vintage_panels()
+            except Exception:
+                # Runtime path overrides are best-effort; model-level fallback handles failures.
+                pass
 
     for model in model_list:
         realtime_model = getattr(model, "realtime_model", None)
-        if realtime_model is None:
+        if realtime_model is not None:
+            _apply_to_model_object(realtime_model)
             continue
-
-        if md_path is not None and hasattr(realtime_model, "md_panel_path"):
-            setattr(realtime_model, "md_panel_path", Path(md_path))
-            if hasattr(realtime_model, "_panel"):
-                setattr(realtime_model, "_panel", None)
-            if hasattr(realtime_model, "_cache_quarterly"):
-                setattr(realtime_model, "_cache_quarterly", {})
-
-        if hasattr(realtime_model, "excluded_years"):
-            setattr(realtime_model, "excluded_years", excluded_years)
-            if hasattr(realtime_model, "_cache_quarterly"):
-                setattr(realtime_model, "_cache_quarterly", {})
+        _apply_to_model_object(model)
 
 
 def _build_quarterly_origins(
@@ -1943,6 +1961,7 @@ def run_backtest(
     min_target_quarter: str | pd.Period | None = "2018Q1",
     ragged_edge_covariates: bool = True,
     md_panel_path: str | Path | None = None,
+    qd_panel_path: str | Path | None = None,
     mixed_freq_excluded_years: Sequence[int] | None = None,
 ) -> pd.DataFrame:
     if origin_schedule not in {"quarterly", "monthly"}:
@@ -1958,6 +1977,7 @@ def run_backtest(
     apply_model_runtime_options(
         model_list=model_list,
         md_panel_path=md_panel_path,
+        qd_panel_path=qd_panel_path,
         mixed_freq_excluded_years=mixed_freq_excluded_years,
     )
 
