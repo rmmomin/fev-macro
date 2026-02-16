@@ -30,10 +30,7 @@ make eval-processed-standard
 Details: [`docs/data_processing.md`](docs/data_processing.md)
 
 ## Models included
-Core baselines and multivariate models include `naive_last`, `drift`, `auto_arima`, `local_trend_ssm`, `random_forest`, `xgboost`, `factor_pca_qd`, `mixed_freq_dfm_md`, and BVAR growth variants.
-
-Newly emphasized variants:
-- `ar4`
+Core baselines and multivariate models include `naive_last`, `mean`, `drift`, `ar4`, `auto_arima`, `auto_ets`, `theta`, `local_trend_ssm`, `random_forest`, `xgboost`, `factor_pca_qd`, `mixed_freq_dfm_md`, `bvar_minnesota_8`, `bvar_minnesota_20`, `bvar_minnesota_growth_8`, `bvar_minnesota_growth_20`, and `chronos2` (plus optional ensemble variants).
 
 Full model catalog: [`docs/models.md`](docs/models.md)
 
@@ -61,3 +58,4 @@ make plot-2025q4
 - fbi library: <https://github.com/cykbennie/fbi>
 - ALFRED: <https://alfred.stlouisfed.org>
 - FRED API: <https://api.stlouisfed.org/fred>
+- fev (Forecast EValuation library): <https://github.com/autogluon/fev>
