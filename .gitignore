@@ -3,7 +3,9 @@ __pycache__/
 .pytest_cache/
 .env
 .env.*
-results/
+results/*
+!results/processed_standard_h1_first_second_third_w100_20260216/
+!results/processed_standard_h1_first_second_third_w100_20260216/**
 data/*
 !data/panels/
 !data/panels/**
