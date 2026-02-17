@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import signal
 import sys
@@ -35,6 +36,11 @@ from fev_macro.realtime_runner import (  # noqa: E402
     resolve_models as resolve_mode_models,
     resolve_qd_panel_path,
 )
+
+DEFAULT_PROCESSED_QD_LATEST_CSV = Path("data/processed/fred_qd_latest_processed.csv")
+DEFAULT_PROCESSED_MD_LATEST_CSV = Path("data/processed/fred_md_latest_processed.csv")
+DEFAULT_RAW_QD_LATEST_CSV = Path("data/latest/fred_qd_latest.csv")
+DEFAULT_LATEST_FETCH_MANIFEST = Path("data/latest/fred_latest_fetch_manifest.json")
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,12 +97,30 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--processed_qd_target_levels_csv",
+        type=str,
+        default="",
+        help=(
+            "Optional raw/unprocessed QD snapshot CSV used to restore level target values "
+            "(e.g., GDPC1) when --processed_qd_csv contains transformed target columns."
+        ),
+    )
+    parser.add_argument(
         "--processed_vintage",
         type=str,
         default="",
         help=(
             "Vintage label (YYYY-MM) for processed CSV inputs. If omitted, inferred from filename; "
             "fallback is --vintage when that is not 'latest'."
+        ),
+    )
+    parser.add_argument(
+        "--latest_manifest",
+        type=str,
+        default=str(DEFAULT_LATEST_FETCH_MANIFEST),
+        help=(
+            "Latest fetch manifest JSON used to infer processed vintage when "
+            "--processed_vintage is not provided."
         ),
     )
     parser.add_argument(
@@ -163,26 +187,141 @@ def _resolve_processed_vintage(args: argparse.Namespace, *paths: Path) -> str:
         return str(pd.Period(str(args.processed_vintage), freq="M"))
     if str(args.vintage).lower() != "latest":
         return str(pd.Period(str(args.vintage), freq="M"))
+
+    manifest_path = Path(str(args.latest_manifest)).expanduser().resolve() if str(args.latest_manifest).strip() else None
+    if manifest_path is not None:
+        from_manifest = _infer_vintage_from_manifest(manifest_path)
+        if from_manifest:
+            return from_manifest
+
     for path in paths:
         inferred = _infer_vintage_from_path(path)
         if inferred:
             return inferred
-    raise ValueError(
-        "Unable to resolve processed vintage label. Provide --processed_vintage YYYY-MM "
-        "or set --vintage explicitly."
+    for path in paths:
+        inferred = _infer_vintage_from_csv_data(path)
+        if inferred:
+            return inferred
+    fallback = str(pd.Period(pd.Timestamp.utcnow(), freq="M"))
+    print(
+        "WARNING: Unable to infer processed vintage label from filenames or data dates; "
+        f"using current UTC month {fallback}."
     )
+    return fallback
+
+
+def _infer_vintage_from_manifest(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    generated = payload.get("generated_at_utc")
+    if not generated:
+        return None
+    try:
+        ts = pd.Timestamp(generated)
+        if ts.tzinfo is not None:
+            ts = ts.tz_convert("UTC").tz_localize(None)
+        return str(ts.to_period("M"))
+    except Exception:
+        return None
+
+
+def _infer_vintage_from_csv_data(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        frame = pd.read_csv(path, usecols=["date"])
+    except Exception:
+        return None
+    if frame.empty or "date" not in frame.columns:
+        return None
+    ts = pd.to_datetime(frame["date"], errors="coerce").dropna()
+    if ts.empty:
+        return None
+    return str(pd.Period(ts.max(), freq="M"))
+
+
+def _apply_processed_latest_defaults(args: argparse.Namespace, mode: str) -> None:
+    if mode != "processed":
+        return
+
+    used_default_processed_qd = False
+    if not args.processed_qd_csv and not args.vintage_panel:
+        qd_candidate = DEFAULT_PROCESSED_QD_LATEST_CSV.expanduser().resolve()
+        if qd_candidate.exists():
+            args.processed_qd_csv = str(qd_candidate)
+            used_default_processed_qd = True
+
+    if not args.processed_md_csv and not args.md_vintage_panel:
+        md_candidate = DEFAULT_PROCESSED_MD_LATEST_CSV.expanduser().resolve()
+        if md_candidate.exists():
+            args.processed_md_csv = str(md_candidate)
+
+    if used_default_processed_qd and not args.processed_qd_target_levels_csv:
+        raw_qd_candidate = DEFAULT_RAW_QD_LATEST_CSV.expanduser().resolve()
+        if raw_qd_candidate.exists():
+            args.processed_qd_target_levels_csv = str(raw_qd_candidate)
+
+
+def _load_raw_level_target_by_date(raw_qd_csv_path: Path, target_col: str) -> pd.Series:
+    raw = pd.read_csv(raw_qd_csv_path, dtype=str)
+    if raw.empty:
+        return pd.Series(dtype=float)
+    if target_col not in raw.columns:
+        return pd.Series(dtype=float)
+
+    first_col = str(raw.columns[0])
+    parsed = pd.to_datetime(raw[first_col], format="%m/%d/%Y", errors="coerce")
+    if parsed.notna().sum() == 0:
+        parsed = pd.to_datetime(raw[first_col], errors="coerce")
+
+    data = raw.loc[parsed.notna(), [target_col]].copy()
+    if data.empty:
+        return pd.Series(dtype=float)
+
+    data["date"] = parsed.loc[parsed.notna()].dt.strftime("%Y-%m-%d").values
+    data[target_col] = pd.to_numeric(data[target_col], errors="coerce")
+    out = data.dropna(subset=[target_col]).drop_duplicates(subset=["date"], keep="last")
+    if out.empty:
+        return pd.Series(dtype=float)
+    return out.set_index("date")[target_col].astype(float)
 
 
 def _load_processed_single_vintage_csv(
     csv_path: Path,
     vintage_id: str,
     target_col: str | None,
-) -> pd.DataFrame:
+    target_levels_source_csv: Path | None = None,
+) -> tuple[pd.DataFrame, int]:
     raw = pd.read_csv(csv_path)
     if "date" not in raw.columns:
         raise ValueError(f"Processed CSV must contain 'date' column: {csv_path}")
     if target_col and target_col not in raw.columns:
         raise ValueError(f"Processed CSV missing target column '{target_col}': {csv_path}")
+
+    restored_target_rows = 0
+    if target_col and target_levels_source_csv is not None and target_levels_source_csv.exists():
+        try:
+            level_by_date = _load_raw_level_target_by_date(target_levels_source_csv, target_col=target_col)
+            if not level_by_date.empty:
+                date_key = pd.to_datetime(raw["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                restored = pd.to_numeric(date_key.map(level_by_date), errors="coerce")
+                restored_target_rows = int(restored.notna().sum())
+                if restored_target_rows > 0:
+                    raw[target_col] = restored
+                else:
+                    print(
+                        "WARNING: Could not align any target level rows from "
+                        f"{target_levels_source_csv} into {csv_path} for {target_col}."
+                    )
+        except Exception as exc:
+            print(
+                "WARNING: Failed to restore level target values from "
+                f"{target_levels_source_csv}: {type(exc).__name__}: {exc}"
+            )
 
     df = raw.copy()
     df["timestamp"] = pd.to_datetime(df["date"], errors="coerce")
@@ -195,7 +334,19 @@ def _load_processed_single_vintage_csv(
     df["asof_date"] = compute_vintage_asof_date(vintage_id)
     if target_col:
         df[target_col] = pd.to_numeric(df[target_col], errors="coerce")
-    return df
+        if str(target_col).upper() == "GDPC1":
+            non_missing = df[target_col].dropna()
+            if not non_missing.empty and float(non_missing.max()) < 1000.0:
+                print(
+                    "WARNING: GDPC1 in processed QD input appears transformed/scaled "
+                    f"(max={float(non_missing.max()):.6g}). Forecast levels/SAAR may be invalid."
+                )
+        if restored_target_rows > 0 and target_levels_source_csv is not None:
+            print(
+                "Restored level target values from raw QD snapshot: "
+                f"{target_levels_source_csv} (rows={restored_target_rows})."
+            )
+    return df, restored_target_rows
 
 
 def _load_vintage_panel_from_args(
@@ -212,10 +363,16 @@ def _load_vintage_panel_from_args(
         raise FileNotFoundError(f"Processed QD CSV not found: {qd_csv_path}")
 
     vintage_id = _resolve_processed_vintage(args, qd_csv_path)
-    panel = _load_processed_single_vintage_csv(
+    target_levels_source = (
+        Path(args.processed_qd_target_levels_csv).expanduser().resolve()
+        if str(args.processed_qd_target_levels_csv).strip()
+        else None
+    )
+    panel, _ = _load_processed_single_vintage_csv(
         csv_path=qd_csv_path,
         vintage_id=vintage_id,
         target_col=args.target_col,
+        target_levels_source_csv=target_levels_source,
     )
     return panel, vintage_id
 
@@ -233,7 +390,7 @@ def _build_md_panel_from_processed_csv(
         raise FileNotFoundError(f"Processed MD CSV not found: {md_csv_path}")
 
     vintage_id = _resolve_processed_vintage(args, md_csv_path)
-    md_df = _load_processed_single_vintage_csv(
+    md_df, _ = _load_processed_single_vintage_csv(
         csv_path=md_csv_path,
         vintage_id=vintage_id,
         target_col=None,
@@ -310,6 +467,7 @@ def _latest_observed_quarter(vintage_slice: pd.DataFrame, target_col: str) -> pd
 def main() -> int:
     args = parse_args()
     mode = normalize_mode(args.mode)
+    _apply_processed_latest_defaults(args=args, mode=mode)
     release_path = Path(args.release_csv).resolve() if args.release_csv else None
     panel_path = resolve_qd_panel_path(mode=mode, explicit_path=args.vintage_panel or None)
     output_path = resolve_latest_output_path(mode=mode, explicit_path=args.output_csv or None)
@@ -422,6 +580,8 @@ def main() -> int:
     )
     if args.processed_qd_csv:
         print(f"Processed QD input: {Path(args.processed_qd_csv).expanduser().resolve()}")
+    if args.processed_qd_target_levels_csv:
+        print(f"Processed QD target levels source: {Path(args.processed_qd_target_levels_csv).expanduser().resolve()}")
     if args.processed_md_csv:
         print(f"Processed MD input: {Path(args.processed_md_csv).expanduser().resolve()}")
     if md_panel_override is not None:
