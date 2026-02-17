@@ -349,3 +349,7 @@ def test_snapshot_allow_and_window_vintage_provenance_outputs(
     predictions_df = pd.read_csv(predictions_csv)
     assert "train_vintage" in predictions_df.columns
     assert predictions_df["train_vintage"].replace("", pd.NA).notna().any()
+
+    leaderboard_df = pd.read_csv(historical_results / "leaderboard.csv")
+    assert {"MAE", "MSE", "RMSE"}.issubset(set(leaderboard_df.columns))
+    assert leaderboard_df[["MAE", "MSE", "RMSE"]].notna().all().all()

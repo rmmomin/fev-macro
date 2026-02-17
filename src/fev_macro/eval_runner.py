@@ -643,6 +643,7 @@ def run_eval_pipeline(
         baseline_model=args.baseline_model,
         seed=int(args.seed),
     )
+    leaderboard_path = results_dir / "leaderboard.csv"
 
     metric_col = infer_metric_column(pd.DataFrame(summaries))
 
@@ -661,6 +662,11 @@ def run_eval_pipeline(
         window_vintage_log=window_vintage_log,
         snapshot_eval=snapshot_eval,
     )
+    leaderboard_df = _augment_leaderboard_with_point_error_metrics(
+        leaderboard_df=leaderboard_df,
+        records_df=records_df,
+    )
+    leaderboard_df.to_csv(leaderboard_path, index=False)
     window_vintages_df = _build_window_vintages_table(
         records_df=records_df,
         window_vintage_log=window_vintage_log,
@@ -715,7 +721,7 @@ def run_eval_pipeline(
     print(f"Wrote summaries: {summaries_jsonl}")
     print(f"Wrote summaries CSV: {summaries_csv}")
     print(f"Wrote timing report: {timing_csv}")
-    print(f"Wrote leaderboard: {results_dir / 'leaderboard.csv'}")
+    print(f"Wrote leaderboard: {leaderboard_path}")
     print(f"Wrote pairwise: {results_dir / 'pairwise.csv'}")
     print(f"Wrote prediction records: {predictions_csv}")
     print(f"Wrote window vintages: {window_vintages_csv}")
@@ -874,6 +880,67 @@ def _build_window_vintages_table(
     out = pd.DataFrame(rows)
     out = out.sort_values(["task_name", "window_idx"], kind="stable").reset_index(drop=True)
     return out[columns]
+
+
+def _augment_leaderboard_with_point_error_metrics(
+    leaderboard_df: pd.DataFrame,
+    records_df: pd.DataFrame,
+) -> pd.DataFrame:
+    out = leaderboard_df.copy()
+    if out.empty or "model_name" not in out.columns:
+        return out
+
+    metrics_df = _compute_point_error_metrics(records_df=records_df)
+    if metrics_df.empty:
+        for col in ("MAE", "MSE", "RMSE"):
+            if col not in out.columns:
+                out[col] = np.nan
+        return out
+
+    out["model_name"] = out["model_name"].astype(str)
+    merged = out.merge(metrics_df, on="model_name", how="left", suffixes=("", "_computed"))
+
+    for col in ("MAE", "MSE", "RMSE"):
+        computed_col = f"{col}_computed"
+        if computed_col in merged.columns:
+            computed_vals = pd.to_numeric(merged[computed_col], errors="coerce")
+        else:
+            computed_vals = pd.Series(np.nan, index=merged.index, dtype=float)
+        if col in merged.columns:
+            existing = pd.to_numeric(merged[col], errors="coerce")
+            merged[col] = existing.combine_first(computed_vals)
+        else:
+            merged[col] = computed_vals
+        if computed_col in merged.columns:
+            merged = merged.drop(columns=[computed_col])
+
+    return merged
+
+
+def _compute_point_error_metrics(records_df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["model_name", "y_true", "y_pred"]
+    if records_df.empty or any(col not in records_df.columns for col in cols):
+        return pd.DataFrame(columns=["model_name", "MAE", "MSE", "RMSE"])
+
+    work = records_df[cols].copy()
+    work["model_name"] = work["model_name"].astype(str)
+    work["y_true"] = pd.to_numeric(work["y_true"], errors="coerce")
+    work["y_pred"] = pd.to_numeric(work["y_pred"], errors="coerce")
+    work["error"] = work["y_pred"] - work["y_true"]
+
+    rows: list[dict[str, Any]] = []
+    for model_name, grp in work.groupby("model_name", dropna=False, sort=False):
+        err = pd.to_numeric(grp["error"], errors="coerce").to_numpy(dtype=float)
+        finite = err[np.isfinite(err)]
+        if finite.size == 0:
+            rows.append({"model_name": str(model_name), "MAE": np.nan, "MSE": np.nan, "RMSE": np.nan})
+            continue
+        mse = float(np.mean(np.square(finite)))
+        mae = float(np.mean(np.abs(finite)))
+        rmse = float(np.sqrt(mse))
+        rows.append({"model_name": str(model_name), "MAE": mae, "MSE": mse, "RMSE": rmse})
+
+    return pd.DataFrame(rows, columns=["model_name", "MAE", "MSE", "RMSE"])
 
 
 def _resolve_git_commit_hash() -> str:
