@@ -42,6 +42,7 @@ PROFILE_CHOICES: tuple[Profile, ...] = ("smoke", "standard", "full")
 
 FULL_PROFILE_MODELS: list[str] = [
     "naive_last",
+    "atlantafed_gdpnow",
     "mean",
     "ar4",
     "drift",
@@ -109,6 +110,7 @@ COVID_EXCLUDED_QUARTERS: tuple[pd.Period, ...] = (
     pd.Period("2020Q3", freq="Q-DEC"),
 )
 POINT_ERROR_METRIC_COLUMNS: tuple[str, ...] = ("MAE", "MSE", "RMSE")
+GDPNOW_MODEL_NAMES: frozenset[str] = frozenset({"atlantafed_gdpnow", "gdpnow"})
 
 
 def build_eval_arg_parser(
@@ -137,7 +139,7 @@ def build_eval_arg_parser(
         choices=sorted(SUPPORTED_TARGET_TRANSFORMS),
         help="Target transform used for model training targets.",
     )
-    parser.add_argument("--horizons", type=int, nargs="+", default=[1, 2, 3, 4])
+    parser.add_argument("--horizons", type=int, nargs="+", default=[1])
     parser.add_argument("--num_windows", type=int, default=100)
     parser.add_argument("--metric", type=str, default="RMSE")
     parser.add_argument(
@@ -265,7 +267,7 @@ def build_eval_arg_parser(
         default=None,
         help=(
             "Release stages to evaluate. "
-            "Default is first for alfred_qoq_saar/level and first/second/third for alfred_qoq/realtime_qoq_saar."
+            "Default is first vintage (stage=first)."
         ),
     )
     parser.add_argument(
@@ -377,6 +379,16 @@ def run_eval_pipeline(
     if baseline_model not in requested_models:
         requested_models = [*requested_models, baseline_model]
         print(f"Added baseline model '{baseline_model}' to model run list.")
+
+    requested_horizons = [int(h) for h in (getattr(args, "horizons", None) or [])]
+    if any(h > 1 for h in requested_horizons):
+        disallowed_gdpnow_models = [m for m in requested_models if m in GDPNOW_MODEL_NAMES]
+        if disallowed_gdpnow_models:
+            raise ValueError(
+                "GDPNow nowcast models are only supported for horizon h=1. "
+                f"Received horizons={requested_horizons} with models={disallowed_gdpnow_models}. "
+                "Remove GDPNow models or run with --horizons 1."
+            )
 
     unknown_models = [m for m in requested_models if m not in known_models]
     if unknown_models:
@@ -1356,10 +1368,7 @@ def _resolve_eval_release_stages(
     elif eval_release_stages:
         stages = [str(s).strip().lower() for s in eval_release_stages]
     else:
-        if eval_release_metric == "alfred_qoq_saar":
-            stages = ["first"]
-        else:
-            stages = ["first", "second", "third"] if eval_release_metric in {"alfred_qoq", "realtime_qoq_saar"} else ["first"]
+        stages = ["first"]
 
     stages = list(dict.fromkeys(stages))
     if eval_release_metric in {"alfred_qoq", "alfred_qoq_saar", "realtime_qoq_saar"}:
@@ -1489,13 +1498,13 @@ def _apply_profile_defaults(args: argparse.Namespace, covariate_mode: CovariateM
         setattr(args, dest, value)
 
     if profile == "smoke":
-        _set_if_not_provided("horizons", [1, 4])
+        _set_if_not_provided("horizons", [1])
         _set_if_not_provided("num_windows", 10)
         _set_if_not_provided("metric", "RMSE")
         _set_if_not_provided("models", list(SMOKE_PROFILE_MODELS))
 
     elif profile == "standard":
-        _set_if_not_provided("horizons", [1, 2, 4])
+        _set_if_not_provided("horizons", [1])
         _set_if_not_provided("metric", "RMSE")
         if covariate_mode == "unprocessed":
             _set_if_not_provided("target_transform", "log_level")
@@ -1507,7 +1516,7 @@ def _apply_profile_defaults(args: argparse.Namespace, covariate_mode: CovariateM
             _set_if_not_provided("models", list(PROCESSED_STANDARD_MODELS))
 
     else:  # profile == "full"
-        _set_if_not_provided("horizons", [1, 2, 3, 4])
+        _set_if_not_provided("horizons", [1])
         _set_if_not_provided("num_windows", 80)
         _set_if_not_provided("metric", "RMSE")
         _set_if_not_provided("models", list(FULL_PROFILE_MODELS))
