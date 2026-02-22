@@ -16,13 +16,13 @@ def parse_args():
     parser = build_eval_arg_parser(
         description=(
             "Run evaluation with PROCESSED covariates (FRED transform codes / stationary-ish inputs) "
-            "and GDP q/q SAAR target by default."
+            "and GDP q/q target by default."
         ),
-        default_target_transform="saar_growth",
+        default_target_transform="qoq_growth",
         default_results_dir="results/bench_processed_g",
         default_model_set="auto",
         default_models=None,
-        default_task_prefix="gdp_saar",
+        default_task_prefix="gdp_qoq",
         default_qd_vintage_panel="data/panels/fred_qd_vintage_panel_processed.parquet",
     )
     return parse_args_with_provenance(parser)
@@ -32,7 +32,7 @@ def main() -> None:
     args = parse_args()
     run_eval_pipeline(
         covariate_mode="processed",
-        default_target_transform="saar_growth",
+        default_target_transform="qoq_growth",
         model_set="auto",
         cli_args=args,
     )

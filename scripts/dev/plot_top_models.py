@@ -35,7 +35,7 @@ from fev_macro.tasks import make_gdp_tasks  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Plot train/OOS real GDP q/q SAAR growth for top-K models from the leaderboard, "
+            "Plot train/OOS real GDP growth for top-K models from the leaderboard, "
             "using gdpc1 release-table truth."
         )
     )
@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target_transform",
         type=str,
-        default="saar_growth",
+        default="qoq_growth",
         choices=sorted(SUPPORTED_TARGET_TRANSFORMS),
         help="Forecast target transform used by the benchmark.",
     )
@@ -64,7 +64,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--task_prefix",
         type=str,
-        default="log_real_gdp",
+        default="gdp_qoq",
         help="Task prefix used in benchmark task names.",
     )
     parser.add_argument(
@@ -88,8 +88,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--release_metric",
         type=str,
-        choices=["realtime_qoq_saar", "level"],
-        default="realtime_qoq_saar",
+        choices=["alfred_qoq", "realtime_qoq_saar", "level"],
+        default="alfred_qoq",
         help="Release-table column family used for truth.",
     )
     parser.add_argument(
@@ -237,7 +237,7 @@ def make_growth_view(
     oos["timestamp"] = pd.to_datetime(oos["timestamp"], errors="coerce")
     oos = oos.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
-    if target_transform == "saar_growth":
+    if target_transform in {"saar_growth", "qoq_growth"}:
         full["actual_growth_saar"] = pd.to_numeric(full["target"], errors="coerce")
         oos["actual_growth_saar"] = pd.to_numeric(oos["actual"], errors="coerce")
         for model_name in model_names:
@@ -283,6 +283,7 @@ def make_plot(
     output_path: Path,
     horizon: int,
     num_windows: int,
+    target_transform: str,
 ) -> None:
     fig, ax = plt.subplots(figsize=(14, 7))
 
@@ -320,14 +321,15 @@ def make_plot(
 
     ax.axvline(first_test_ts, color="gray", linestyle=":", linewidth=1.6, label="Test start")
 
+    growth_label = "q/q SAAR" if target_transform == "saar_growth" else "q/q"
     ax.set_title(
         (
-            "US Real GDP Growth (q/q SAAR): "
+            f"US Real GDP Growth ({growth_label}): "
             f"Train History + OOS Forecasts (Top {len(model_names)} Models, h={horizon}, windows={num_windows})"
         )
     )
     ax.set_xlabel("Date")
-    ax.set_ylabel("Growth (percent, SAAR)")
+    ax.set_ylabel("Growth (percent)")
     ax.grid(alpha=0.2)
     ax.legend(loc="best", fontsize=9, ncol=2)
     fig.tight_layout()
@@ -342,6 +344,8 @@ def main() -> None:
 
     if args.release_metric == "realtime_qoq_saar" and args.target_transform != "saar_growth":
         raise ValueError("--release_metric realtime_qoq_saar requires --target_transform saar_growth.")
+    if args.release_metric == "alfred_qoq" and args.target_transform != "qoq_growth":
+        raise ValueError("--release_metric alfred_qoq requires --target_transform qoq_growth.")
 
     results_dir = Path(args.results_dir)
     leaderboard_path = Path(args.leaderboard)
@@ -477,6 +481,7 @@ def main() -> None:
         output_path=output_path,
         horizon=args.horizon,
         num_windows=effective_num_windows,
+        target_transform=args.target_transform,
     )
 
     print(f"Top models: {top_models}")

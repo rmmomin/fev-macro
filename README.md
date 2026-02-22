@@ -6,8 +6,8 @@
 ## What this repo does
 1. Build vintage panels for FRED-QD and FRED-MD historical vintages.
 2. Build processed panels using FRED transform codes + MD outlier/trimming semantics (code zip + fbi).
-3. Build GDP release truth table from ALFRED and compute q/q SAAR growth for first/second/third releases robustly.
-4. Run fev evaluation for both processed and unprocessed panels, with different target objectives (LL vs G), but KPI always q/q SAAR.
+3. Build GDP release truth table from ALFRED and compute release-vintage q/q and q/q SAAR growth for first/second/third releases.
+4. Run fev evaluation for both processed and unprocessed panels, with different target objectives (LL vs G) and release-truth mappings.
 5. Produce a 2025Q4 one-shot forecast using latest FRED API pulls and processed-mode top models.
 
 ## Quickstart
@@ -25,7 +25,7 @@ make eval-processed-standard
 | Mode | Covariates | Training objective | KPI for comparison |
 |---|---|---|---|
 | `unprocessed` | Raw vintage covariates | `log_level` (LL) | q/q SAAR real GDP growth vs ALFRED release truth |
-| `processed` | Transform-code + MD outlier/trimming processed covariates | `saar_growth` (G) | q/q SAAR real GDP growth vs ALFRED release truth |
+| `processed` | Transform-code + MD outlier/trimming processed covariates | `qoq_growth` (G) | q/q real GDP growth vs BEA-verified ALFRED release truth (`qoq_growth_alfred_*`) |
 
 Details: [`docs/data_processing.md`](docs/data_processing.md)
 
@@ -35,7 +35,7 @@ Core baselines and multivariate models include `naive_last`, `mean`, `drift`, `a
 Full model catalog: [`docs/models.md`](docs/models.md)
 
 ## Real-time evaluation policy
-**By default, every rolling window trains on an as-of vintage (vintage-correct). Snapshot evaluation is blocked unless you explicitly pass `--allow_snapshot_eval`.** Evaluation is always scored against release-consistent q/q SAAR GDP truth from `data/panels/gdpc1_releases_first_second_third.csv`, using `qoq_saar_growth_realtime_first_pct`, `qoq_saar_growth_realtime_second_pct`, and `qoq_saar_growth_realtime_third_pct` when available. For each quarter/release stage, realtime truth is built from one as-of panel vintage to avoid revised-history leakage from mixed-vintage denominators around reindex/rebenchmark events. Protocol details: [`docs/realtime_protocol.md`](docs/realtime_protocol.md).
+**By default, every rolling window trains on an as-of vintage (vintage-correct). Snapshot evaluation is blocked unless you explicitly pass `--allow_snapshot_eval`.** For processed `run_eval`, release truth defaults to BEA-verified ALFRED q/q growth from `data/panels/gdpc1_releases_first_second_third.csv`, using `qoq_growth_alfred_first_pct`, `qoq_growth_alfred_second_pct`, and `qoq_growth_alfred_third_pct` (`--eval_release_metric alfred_qoq`, `--target_transform qoq_growth`). Realtime SAAR truth remains available via `--eval_release_metric realtime_qoq_saar --target_transform saar_growth`.
 
 ## Latest-vintage one-shot forecast + 2025Q4 comparison
 ```bash

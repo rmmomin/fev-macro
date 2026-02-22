@@ -6,10 +6,13 @@ first/second/third available releases per observation date, and adds q/q growth
 columns computed from the latest-available estimate for the current and previous
 quarter.
 
-Realtime q/q and q/q SAAR growth columns are built from a single as-of snapshot
-in the FRED-QD vintage panel for each release stage (first/second/third), so the
-current-quarter and previous-quarter denominator levels are on the same scale.
-If realtime growth columns already exist, they are overwritten.
+q/q and q/q SAAR growth columns are provided in two forms:
+- ALFRED release-vintage growth (`qoq_*_alfred_*`), computed from GDPC1(q) and
+  GDPC1(q-1) at the same ALFRED release vintage date for each stage.
+- Realtime panel growth (`qoq_*_realtime_*`), built from a single as-of snapshot
+  in the FRED-QD vintage panel for each release stage (first/second/third), so
+  the current-quarter and previous-quarter denominator levels are on the same scale.
+If growth columns already exist, they are overwritten.
 """
 
 from __future__ import annotations
@@ -48,6 +51,16 @@ STAGE_QOQ_SAAR_COLS = {
     "first": "qoq_saar_growth_realtime_first_pct",
     "second": "qoq_saar_growth_realtime_second_pct",
     "third": "qoq_saar_growth_realtime_third_pct",
+}
+STAGE_QOQ_ALFRED_COLS = {
+    "first": "qoq_growth_alfred_first_pct",
+    "second": "qoq_growth_alfred_second_pct",
+    "third": "qoq_growth_alfred_third_pct",
+}
+STAGE_QOQ_SAAR_ALFRED_COLS = {
+    "first": "qoq_saar_growth_alfred_first_pct",
+    "second": "qoq_saar_growth_alfred_second_pct",
+    "third": "qoq_saar_growth_alfred_third_pct",
 }
 DEFAULT_SPIKE_SHOCK_WHITELIST = {"2020Q2", "2020Q3"}
 
@@ -463,6 +476,77 @@ def _compute_realtime_saar_from_panel(
     return out, stage_table
 
 
+def _compute_alfred_stage_growth_from_wide(
+    out: pd.DataFrame,
+    wide: pd.DataFrame,
+    vintage_cols: list[str],
+    vintage_ts: list[pd.Timestamp],
+) -> pd.DataFrame:
+    """Compute stage growth from ALFRED release vintages using same-vintage q and q-1 levels."""
+    out = out.copy()
+    growth_cols = [*STAGE_QOQ_ALFRED_COLS.values(), *STAGE_QOQ_SAAR_ALFRED_COLS.values()]
+    out = out.drop(columns=growth_cols, errors="ignore")
+
+    if not vintage_cols:
+        for col in growth_cols:
+            out[col] = np.nan
+        return out
+
+    wide_obs = pd.to_datetime(wide["observation_date"], errors="coerce")
+    levels = wide[vintage_cols].apply(pd.to_numeric, errors="coerce")
+    levels.columns = pd.to_datetime(pd.Index(vintage_ts), errors="coerce")
+    levels.insert(0, "observation_date", wide_obs)
+    levels = levels.dropna(subset=["observation_date"]).copy()
+
+    if levels.empty:
+        for col in growth_cols:
+            out[col] = np.nan
+        return out
+
+    levels["quarter_ord"] = pd.PeriodIndex(levels["observation_date"], freq="Q-DEC").astype("int64")
+    levels = (
+        levels.sort_values(["quarter_ord", "observation_date"])
+        .drop_duplicates(subset=["quarter_ord"], keep="last")
+        .set_index("quarter_ord")
+        .drop(columns=["observation_date"])
+    )
+
+    out_quarter_ord = pd.PeriodIndex(pd.to_datetime(out["observation_date"], errors="coerce"), freq="Q-DEC").astype("int64")
+    cur_levels = levels.reindex(out_quarter_ord)
+    prev_levels = levels.reindex(out_quarter_ord - 1)
+
+    cur_arr = cur_levels.to_numpy(dtype=float)
+    prev_arr = prev_levels.to_numpy(dtype=float)
+    col_to_pos = {pd.Timestamp(col): idx for idx, col in enumerate(cur_levels.columns)}
+    row_idx = np.arange(len(out), dtype=int)
+
+    for stage in STAGES:
+        release_dates = pd.to_datetime(out[STAGE_RELEASE_DATE_COLS[stage]], errors="coerce")
+        col_idx = (
+            release_dates.map(
+                lambda d: col_to_pos.get(pd.Timestamp(d), -1) if pd.notna(d) else -1
+            )
+            .astype(int)
+            .to_numpy()
+        )
+        has_col = col_idx >= 0
+
+        y_q = np.full(len(out), np.nan, dtype=float)
+        y_qm1 = np.full(len(out), np.nan, dtype=float)
+        y_q[has_col] = cur_arr[row_idx[has_col], col_idx[has_col]]
+        y_qm1[has_col] = prev_arr[row_idx[has_col], col_idx[has_col]]
+
+        valid = np.isfinite(y_q) & np.isfinite(y_qm1) & (y_q > 0.0) & (y_qm1 > 0.0)
+        ratio = np.where(valid, y_q / y_qm1, np.nan)
+        out[STAGE_QOQ_ALFRED_COLS[stage]] = np.where(valid, (ratio - 1.0) * 100.0, np.nan)
+        out[STAGE_QOQ_SAAR_ALFRED_COLS[stage]] = np.where(valid, (ratio**4 - 1.0) * 100.0, np.nan)
+
+    for col in growth_cols:
+        if col not in out.columns:
+            out[col] = np.nan
+    return out
+
+
 def build_release_dataset(
     wide: pd.DataFrame,
     series: str,
@@ -543,6 +627,13 @@ def build_release_dataset(
     ratio = out["latest_release"] / out["latest_prev_release"]
     out["qoq_growth_latest_pct"] = (ratio - 1.0) * 100.0
     out["qoq_saar_growth_latest_pct"] = (ratio.pow(4) - 1.0) * 100.0
+
+    out = _compute_alfred_stage_growth_from_wide(
+        out=out,
+        wide=wide,
+        vintage_cols=vintage_cols,
+        vintage_ts=vintage_ts,
+    )
 
     # Realtime growth uses GDPC1 levels from the selected as-of vintage panel
     # to avoid mixing vintages around level breaks.

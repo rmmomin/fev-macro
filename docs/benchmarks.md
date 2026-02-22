@@ -10,7 +10,7 @@ make eval-processed-standard
 - `smoke`: `num_windows=10`, `horizons={1,4}`, models `{naive_last, drift, auto_arima}`
 - `standard`:
   - unprocessed LL: `num_windows=60`, `horizons={1,2,4}`, excludes `chronos2` and ensemble models
-  - processed G: `num_windows=40`, `horizons={1,2,4}`, excludes `chronos2` and ensemble models
+  - processed G (`qoq_growth`, `alfred_qoq` truth): `num_windows=40`, `horizons={1,2,4}`, excludes `chronos2` and ensemble models
 - `full`: full/default long-run profile
 
 ## Realtime OOS

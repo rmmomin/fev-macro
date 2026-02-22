@@ -14,6 +14,7 @@ import pandas as pd
 from .data import (
     DEFAULT_SOURCE_SERIES_CANDIDATES,
     DEFAULT_TARGET_SERIES_NAME,
+    RELEASE_STAGE_TO_ALFRED_QOQ_COLUMN,
     HistoricalQuarterlyVintageProvider,
     RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN,
     SUPPORTED_TARGET_TRANSFORMS,
@@ -231,7 +232,7 @@ def build_eval_arg_parser(
     parser.add_argument(
         "--eval_release_metric",
         type=str,
-        choices=["auto", "realtime_qoq_saar", "level"],
+        choices=["auto", "alfred_qoq", "realtime_qoq_saar", "level"],
         default="auto",
         help="Release-table column family used for truth. 'auto' infers from target transform.",
     )
@@ -255,7 +256,7 @@ def build_eval_arg_parser(
         default=None,
         help=(
             "Release stages to evaluate. "
-            "Default is first/second/third for realtime_qoq_saar and first for level."
+            "Default is first/second/third for alfred_qoq/realtime_qoq_saar and first for level."
         ),
     )
     parser.add_argument(
@@ -269,7 +270,7 @@ def build_eval_arg_parser(
         action=argparse.BooleanOptionalAction,
         default=None,
         help=(
-            "Validate that y_true matches the release-table truth column for first/second/third realtime SAAR. "
+            "Validate that y_true matches the selected release-table truth column for first/second/third growth stages. "
             "Defaults to enabled for processed runs and disabled otherwise."
         ),
     )
@@ -290,7 +291,7 @@ def parse_args_with_provenance(
 def run_eval_pipeline(
     *,
     covariate_mode: CovariateMode,
-    default_target_transform: Literal["log_level", "saar_growth"],
+    default_target_transform: Literal["log_level", "qoq_growth", "saar_growth"],
     model_set: ModelSet,
     cli_args: argparse.Namespace,
 ) -> None:
@@ -327,6 +328,11 @@ def run_eval_pipeline(
     if eval_release_metric == "realtime_qoq_saar" and target_transform != "saar_growth":
         raise ValueError(
             "--eval_release_metric realtime_qoq_saar requires --target_transform saar_growth "
+            "to keep training targets and evaluation truth on the same scale."
+        )
+    if eval_release_metric == "alfred_qoq" and target_transform != "qoq_growth":
+        raise ValueError(
+            "--eval_release_metric alfred_qoq requires --target_transform qoq_growth "
             "to keep training targets and evaluation truth on the same scale."
         )
 
@@ -971,19 +977,20 @@ def validate_y_true_matches_release_table(
         print(f"WARNING: {msg}")
         return {}
 
+    metric_to_stage_column: dict[str, dict[str, str]] = {
+        "realtime_qoq_saar": RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN,
+        "alfred_qoq": RELEASE_STAGE_TO_ALFRED_QOQ_COLUMN,
+    }
     eval_rows = records_df.copy()
     if "release_metric" in eval_rows.columns:
-        eval_rows = eval_rows.loc[eval_rows["release_metric"].astype(str) == "realtime_qoq_saar"].copy()
-    if eval_rows.empty:
-        print("Truth check skipped: no realtime_qoq_saar prediction rows.")
-        return {}
-
-    eval_rows["release_stage"] = eval_rows["release_stage"].astype(str).str.strip().str.lower()
-    stage_order = ["first", "second", "third"]
-    stages = [stage for stage in stage_order if stage in set(eval_rows["release_stage"].tolist())]
-    if not stages:
-        print("Truth check skipped: no first/second/third release stages in prediction rows.")
-        return {}
+        eval_rows["release_metric"] = eval_rows["release_metric"].astype(str).str.strip().str.lower()
+        eval_rows = eval_rows.loc[eval_rows["release_metric"].isin(metric_to_stage_column)].copy()
+        if eval_rows.empty:
+            print("Truth check skipped: no realtime_qoq_saar/alfred_qoq prediction rows.")
+            return {}
+        metric_kinds = list(dict.fromkeys(eval_rows["release_metric"].tolist()))
+    else:
+        metric_kinds = ["realtime_qoq_saar"]
 
     csv_path = Path(release_csv_path).expanduser().resolve()
     release_df = pd.read_csv(csv_path)
@@ -1009,51 +1016,70 @@ def validate_y_true_matches_release_table(
 
     stats: dict[str, dict[str, float | int]] = {}
     failures: list[str] = []
-    for stage in stages:
-        expected_col = RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN[stage]
-        if expected_col not in release_df.columns:
-            failures.append(f"stage={stage} missing release CSV column {expected_col!r}")
+    for metric_kind in metric_kinds:
+        metric_rows = eval_rows.copy()
+        if "release_metric" in metric_rows.columns:
+            metric_rows = metric_rows.loc[metric_rows["release_metric"] == metric_kind].copy()
+        if metric_rows.empty:
             continue
 
-        stage_rows = eval_rows.loc[eval_rows["release_stage"] == stage].copy()
-        if stage_rows.empty:
+        metric_rows["release_stage"] = metric_rows["release_stage"].astype(str).str.strip().str.lower()
+        stage_order = ["first", "second", "third"]
+        stages = [stage for stage in stage_order if stage in set(metric_rows["release_stage"].tolist())]
+        if not stages:
             continue
 
-        stage_rows["timestamp"] = pd.to_datetime(stage_rows["timestamp"], errors="coerce")
-        stage_rows = stage_rows.loc[stage_rows["timestamp"].notna()].copy()
-        stage_rows["quarter"] = pd.PeriodIndex(stage_rows["timestamp"], freq="Q-DEC")
+        for stage in stages:
+            expected_col = metric_to_stage_column[metric_kind][stage]
+            if expected_col not in release_df.columns:
+                failures.append(
+                    f"metric={metric_kind} stage={stage} missing release CSV column {expected_col!r}"
+                )
+                continue
 
-        expected = release_df[["quarter", expected_col]].copy()
-        expected[expected_col] = pd.to_numeric(expected[expected_col], errors="coerce")
-        merged = stage_rows.merge(expected.rename(columns={expected_col: "expected_y_true"}), on="quarter", how="left")
+            stage_rows = metric_rows.loc[metric_rows["release_stage"] == stage].copy()
+            if stage_rows.empty:
+                continue
 
-        actual = pd.to_numeric(merged["y_true"], errors="coerce").to_numpy(dtype=float)
-        expected_values = pd.to_numeric(merged["expected_y_true"], errors="coerce").to_numpy(dtype=float)
+            stage_rows["timestamp"] = pd.to_datetime(stage_rows["timestamp"], errors="coerce")
+            stage_rows = stage_rows.loc[stage_rows["timestamp"].notna()].copy()
+            stage_rows["quarter"] = pd.PeriodIndex(stage_rows["timestamp"], freq="Q-DEC")
 
-        valid = np.isfinite(actual) & np.isfinite(expected_values)
-        abs_diff = np.abs(actual[valid] - expected_values[valid]) if valid.any() else np.array([], dtype=float)
-        max_abs_diff = float(abs_diff.max()) if abs_diff.size else float("nan")
-        mean_abs_diff = float(abs_diff.mean()) if abs_diff.size else float("nan")
-        num_bad_diff = int((abs_diff > tolerance).sum()) if abs_diff.size else 0
-        num_missing = int((~valid).sum())
-        num_bad = num_bad_diff + num_missing
+            expected = release_df[["quarter", expected_col]].copy()
+            expected[expected_col] = pd.to_numeric(expected[expected_col], errors="coerce")
+            merged = stage_rows.merge(expected.rename(columns={expected_col: "expected_y_true"}), on="quarter", how="left")
 
-        stats[stage] = {
-            "max_abs_diff": max_abs_diff,
-            "mean_abs_diff": mean_abs_diff,
-            "num_bad": num_bad,
-            "num_rows": int(len(stage_rows)),
-        }
+            actual = pd.to_numeric(merged["y_true"], errors="coerce").to_numpy(dtype=float)
+            expected_values = pd.to_numeric(merged["expected_y_true"], errors="coerce").to_numpy(dtype=float)
 
-        max_abs_diff_str = "nan" if not np.isfinite(max_abs_diff) else f"{max_abs_diff:.12g}"
-        mean_abs_diff_str = "nan" if not np.isfinite(mean_abs_diff) else f"{mean_abs_diff:.12g}"
-        print(f"Truth check {stage}: max_abs_diff={max_abs_diff_str}, mean_abs_diff={mean_abs_diff_str}, bad={num_bad}")
+            valid = np.isfinite(actual) & np.isfinite(expected_values)
+            abs_diff = np.abs(actual[valid] - expected_values[valid]) if valid.any() else np.array([], dtype=float)
+            max_abs_diff = float(abs_diff.max()) if abs_diff.size else float("nan")
+            mean_abs_diff = float(abs_diff.mean()) if abs_diff.size else float("nan")
+            num_bad_diff = int((abs_diff > tolerance).sum()) if abs_diff.size else 0
+            num_missing = int((~valid).sum())
+            num_bad = num_bad_diff + num_missing
 
-        if num_bad > 0:
-            failures.append(
-                f"stage={stage} has {num_bad} mismatches/missing rows "
-                f"(max_abs_diff={max_abs_diff_str}, tolerance={tolerance:g})"
+            key = stage if len(metric_kinds) == 1 else f"{metric_kind}:{stage}"
+            stats[key] = {
+                "max_abs_diff": max_abs_diff,
+                "mean_abs_diff": mean_abs_diff,
+                "num_bad": num_bad,
+                "num_rows": int(len(stage_rows)),
+            }
+
+            max_abs_diff_str = "nan" if not np.isfinite(max_abs_diff) else f"{max_abs_diff:.12g}"
+            mean_abs_diff_str = "nan" if not np.isfinite(mean_abs_diff) else f"{mean_abs_diff:.12g}"
+            print(
+                f"Truth check {key}: max_abs_diff={max_abs_diff_str}, "
+                f"mean_abs_diff={mean_abs_diff_str}, bad={num_bad}"
             )
+
+            if num_bad > 0:
+                failures.append(
+                    f"metric={metric_kind} stage={stage} has {num_bad} mismatches/missing rows "
+                    f"(max_abs_diff={max_abs_diff_str}, tolerance={tolerance:g})"
+                )
 
     if failures:
         msg = "Release-truth validation failed: " + "; ".join(failures)
@@ -1086,7 +1112,7 @@ def _compute_kpi_tables(
     df["horizon"] = df["task_name"].map(_parse_task_horizon)
     df["target_error"] = pd.to_numeric(df["y_pred"], errors="coerce") - pd.to_numeric(df["y_true"], errors="coerce")
 
-    if target_transform == "saar_growth":
+    if target_transform in {"saar_growth", "qoq_growth"}:
         df["kpi_true_saar"] = pd.to_numeric(df["y_true"], errors="coerce")
         df["kpi_pred_saar"] = pd.to_numeric(df["y_pred"], errors="coerce")
     elif target_transform in {"log_level", "level"}:
@@ -1226,8 +1252,12 @@ def _assign_period_slice(ts: pd.Series) -> pd.Series:
 def _resolve_eval_release_metric(requested_metric: str, target_transform: str) -> str:
     metric_norm = str(requested_metric).strip().lower()
     if metric_norm == "auto":
-        return "realtime_qoq_saar" if target_transform == "saar_growth" else "level"
-    if metric_norm not in {"realtime_qoq_saar", "level"}:
+        if target_transform == "qoq_growth":
+            return "alfred_qoq"
+        if target_transform == "saar_growth":
+            return "realtime_qoq_saar"
+        return "level"
+    if metric_norm not in {"alfred_qoq", "realtime_qoq_saar", "level"}:
         raise ValueError(f"Unsupported eval_release_metric={requested_metric!r}")
     return metric_norm
 
@@ -1243,14 +1273,14 @@ def _resolve_eval_release_stages(
     elif eval_release_stages:
         stages = [str(s).strip().lower() for s in eval_release_stages]
     else:
-        stages = ["first", "second", "third"] if eval_release_metric == "realtime_qoq_saar" else ["first"]
+        stages = ["first", "second", "third"] if eval_release_metric in {"alfred_qoq", "realtime_qoq_saar"} else ["first"]
 
     stages = list(dict.fromkeys(stages))
-    if eval_release_metric == "realtime_qoq_saar":
+    if eval_release_metric in {"alfred_qoq", "realtime_qoq_saar"}:
         invalid = [s for s in stages if s not in {"first", "second", "third"}]
         if invalid:
             raise ValueError(
-                "Realtime qoq SAAR evaluation only supports release stages first/second/third. "
+                "Growth evaluation only supports release stages first/second/third. "
                 f"Received: {invalid}"
             )
     return stages
@@ -1369,7 +1399,7 @@ def _apply_profile_defaults(args: argparse.Namespace, covariate_mode: CovariateM
             _set_if_not_provided("num_windows", 60)
             _set_if_not_provided("models", list(UNPROCESSED_STANDARD_MODELS))
         else:
-            _set_if_not_provided("target_transform", "saar_growth")
+            _set_if_not_provided("target_transform", "qoq_growth")
             _set_if_not_provided("num_windows", 40)
             _set_if_not_provided("models", list(PROCESSED_STANDARD_MODELS))
 

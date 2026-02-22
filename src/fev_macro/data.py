@@ -18,7 +18,7 @@ DEFAULT_SOURCE_SERIES_CANDIDATES: tuple[str, ...] = (
 )
 DEFAULT_TARGET_SERIES_NAME = "LOG_REAL_GDP"
 DEFAULT_TARGET_TRANSFORM = "log_level"
-SUPPORTED_TARGET_TRANSFORMS = {"level", "log_level", "saar_growth"}
+SUPPORTED_TARGET_TRANSFORMS = {"level", "log_level", "qoq_growth", "saar_growth"}
 SUPPORTED_COVARIATE_MODES = {"unprocessed", "processed"}
 FRED_QD_VINTAGE_PATTERN = re.compile(r"fred[-_]?qd_(\d{4})m(\d{1,2})\.csv$", flags=re.IGNORECASE)
 DEFAULT_GDPC1_RELEASE_CSV_CANDIDATES: tuple[Path, ...] = (
@@ -35,6 +35,11 @@ RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN: dict[str, str] = {
     "first": "qoq_saar_growth_realtime_first_pct",
     "second": "qoq_saar_growth_realtime_second_pct",
     "third": "qoq_saar_growth_realtime_third_pct",
+}
+RELEASE_STAGE_TO_ALFRED_QOQ_COLUMN: dict[str, str] = {
+    "first": "qoq_growth_alfred_first_pct",
+    "second": "qoq_growth_alfred_second_pct",
+    "third": "qoq_growth_alfred_third_pct",
 }
 
 
@@ -697,6 +702,7 @@ def build_real_gdp_target_series(
     Otherwise, target is computed from real GDP level series y_t using:
       - level: y_t
       - log_level: log(y_t)
+      - qoq_growth: 100 * ((y_t / y_{t-1}) - 1)
       - saar_growth: 100 * ((y_t / y_{t-1})**4 - 1)
 
     Returned dataframe has columns:
@@ -807,6 +813,8 @@ def format_gdp_item_id(
 
     if metric_norm in {"realtime_qoq_saar", "realtime_saar", "realtime_qoq_saar_pct"}:
         return f"{base_norm}_qoq_saar_{stage_norm}_pct"
+    if metric_norm in {"alfred_qoq", "alfred_growth_qoq", "bea_qoq"}:
+        return f"{base_norm}_qoq_{stage_norm}_pct"
     return f"{base_norm}_{stage_norm}_{transform_norm}"
 
 
@@ -829,6 +837,13 @@ def apply_gdpc1_release_truth_target(
                 f"got stage={stage!r}."
             )
         stage_col = RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN[stage]
+    elif metric_kind == "alfred_qoq":
+        if stage not in RELEASE_STAGE_TO_ALFRED_QOQ_COLUMN:
+            raise ValueError(
+                "ALFRED q/q release metric supports stages first/second/third only; "
+                f"got stage={stage!r}."
+            )
+        stage_col = RELEASE_STAGE_TO_ALFRED_QOQ_COLUMN[stage]
     else:
         stage_col = RELEASE_STAGE_TO_COLUMN[stage]
 
@@ -859,8 +874,8 @@ def apply_gdpc1_release_truth_target(
     out["quarter"] = pd.PeriodIndex(out["timestamp"], freq="Q-DEC")
 
     mapped_values = pd.to_numeric(out["quarter"].map(release_levels_by_quarter), errors="coerce")
-    if metric_kind == "realtime_qoq_saar":
-        # Values are already q/q SAAR percent and can be used directly as the target.
+    if metric_kind in {"realtime_qoq_saar", "alfred_qoq"}:
+        # Values are already growth percent and can be used directly as the target.
         out["target"] = mapped_values.astype(float)
     else:
         out["target"] = _transform_from_level(level_series=mapped_values, target_transform=target_transform).astype(float)
@@ -880,6 +895,8 @@ def apply_gdpc1_release_truth_target(
 
     if metric_kind == "realtime_qoq_saar" or target_transform == "saar_growth":
         target_units = "pct_qoq_saar"
+    elif metric_kind == "alfred_qoq" or target_transform == "qoq_growth":
+        target_units = "pct_qoq"
     elif target_transform == "log_level":
         target_units = "log_level"
     else:
@@ -1372,9 +1389,13 @@ def _normalize_release_metric(metric: str) -> str:
     aliases = {
         "realtime_saar": "realtime_qoq_saar",
         "realtime_qoq_saar_pct": "realtime_qoq_saar",
+        "alfred_growth": "alfred_qoq",
+        "alfred_growth_qoq": "alfred_qoq",
+        "qoq_alfred": "alfred_qoq",
+        "bea_qoq": "alfred_qoq",
     }
     metric_norm = aliases.get(metric_norm, metric_norm)
-    allowed = {"level", "realtime_qoq_saar"}
+    allowed = {"level", "realtime_qoq_saar", "alfred_qoq"}
     if metric_norm not in allowed:
         raise ValueError(
             f"Unsupported release_metric={metric!r}. "
@@ -1385,6 +1406,10 @@ def _normalize_release_metric(metric: str) -> str:
 
 def _compute_saar_growth(level_series: pd.Series) -> pd.Series:
     return 100.0 * ((level_series / level_series.shift(1)) ** 4 - 1.0)
+
+
+def _compute_qoq_growth(level_series: pd.Series) -> pd.Series:
+    return 100.0 * ((level_series / level_series.shift(1)) - 1.0)
 
 
 def _compute_log_level(level_series: pd.Series) -> pd.Series:
@@ -1398,6 +1423,8 @@ def _transform_from_level(level_series: pd.Series, target_transform: str) -> pd.
         return pd.to_numeric(level_series, errors="coerce")
     if target_transform == "log_level":
         return _compute_log_level(level_series)
+    if target_transform == "qoq_growth":
+        return _compute_qoq_growth(pd.to_numeric(level_series, errors="coerce"))
     if target_transform == "saar_growth":
         return _compute_saar_growth(pd.to_numeric(level_series, errors="coerce"))
     raise ValueError(f"Unsupported target_transform={target_transform}")

@@ -58,6 +58,9 @@ def test_build_release_dataset_realtime_growth_uses_single_vintage_snapshot() ->
     assert np.isnan(out.loc[0, "qoq_saar_growth_realtime_first_pct"])
     assert np.isnan(out.loc[0, "qoq_saar_growth_realtime_second_pct"])
     assert np.isnan(out.loc[0, "qoq_saar_growth_realtime_third_pct"])
+    assert np.isnan(out.loc[0, "qoq_saar_growth_alfred_first_pct"])
+    assert np.isnan(out.loc[0, "qoq_saar_growth_alfred_second_pct"])
+    assert np.isnan(out.loc[0, "qoq_saar_growth_alfred_third_pct"])
 
     # For 2024Q2, each stage maps to the next available monthly panel vintage:
     # first: release 2024-05-30 -> panel 2024-06, second: 2024-06-27 -> 2024-07,
@@ -66,6 +69,10 @@ def test_build_release_dataset_realtime_growth_uses_single_vintage_snapshot() ->
     assert np.isclose(out.loc[1, "qoq_saar_growth_realtime_second_pct"], _saar(111.0, 102.0))
     assert np.isclose(out.loc[1, "qoq_saar_growth_realtime_third_pct"], _saar(112.0, 103.0))
     assert np.isclose(out.loc[1, "qoq_growth_realtime_first_pct"], (110.0 / 101.0 - 1.0) * 100.0)
+    assert np.isclose(out.loc[1, "qoq_saar_growth_alfred_first_pct"], _saar(110.0, 101.0))
+    assert np.isclose(out.loc[1, "qoq_saar_growth_alfred_second_pct"], _saar(111.0, 102.0))
+    assert np.isclose(out.loc[1, "qoq_saar_growth_alfred_third_pct"], _saar(112.0, 103.0))
+    assert np.isclose(out.loc[1, "qoq_growth_alfred_first_pct"], (110.0 / 101.0 - 1.0) * 100.0)
 
 
 def test_reindex_break_regression_uses_same_vintage_for_numerator_and_denominator() -> None:
@@ -93,6 +100,9 @@ def test_reindex_break_regression_uses_same_vintage_for_numerator_and_denominato
     # Old stitched-level approach mixes vintages and creates a fake jump.
     old_stitched = _saar(float(out.loc[1, "first_release"]), float(out.loc[0, "first_release"]))
     assert old_stitched > 40.0
+
+    # ALFRED same-vintage growth uses the stage release vintage for both q and q-1.
+    assert np.isclose(float(out.loc[1, "qoq_saar_growth_alfred_first_pct"]), 0.0)
 
     # New method uses one panel snapshot (v1) for both q and q-1, avoiding the break.
     assert np.isclose(float(out.loc[1, "qoq_saar_growth_realtime_first_pct"]), 0.0)

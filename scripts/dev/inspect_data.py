@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--target_transform",
         type=str,
-        default="saar_growth",
+        default="qoq_growth",
         choices=sorted(SUPPORTED_TARGET_TRANSFORMS),
     )
     parser.add_argument(
@@ -40,8 +40,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--release_metric",
         type=str,
-        choices=["realtime_qoq_saar", "level"],
-        default="realtime_qoq_saar",
+        choices=["alfred_qoq", "realtime_qoq_saar", "level"],
+        default="alfred_qoq",
     )
     parser.add_argument(
         "--release_stage",
@@ -88,6 +88,10 @@ def main() -> None:
     if args.release_metric == "realtime_qoq_saar" and args.target_transform != "saar_growth":
         raise ValueError(
             "--release_metric realtime_qoq_saar requires --target_transform saar_growth."
+        )
+    if args.release_metric == "alfred_qoq" and args.target_transform != "qoq_growth":
+        raise ValueError(
+            "--release_metric alfred_qoq requires --target_transform qoq_growth."
         )
 
     scaffold_df, scaffold_meta = build_release_target_scaffold(
