@@ -2,17 +2,10 @@
 """Build first/second/third GDPC1 release dataset from ALFRED.
 
 The script downloads ALFRED vintage data for a series (default: GDPC1), extracts
-first/second/third available releases per observation date, and adds q/q growth
-columns computed from the latest-available estimate for the current and previous
-quarter.
-
-q/q and q/q SAAR growth columns are provided in two forms:
-- ALFRED release-vintage growth (`qoq_*_alfred_*`), computed from GDPC1(q) and
-  GDPC1(q-1) at the same ALFRED release vintage date for each stage.
-- Realtime panel growth (`qoq_*_realtime_*`), built from a single as-of snapshot
-  in the FRED-QD vintage panel for each release stage (first/second/third), so
-  the current-quarter and previous-quarter denominator levels are on the same scale.
-If growth columns already exist, they are overwritten.
+first/second/third available releases per observation date, and computes ALFRED
+stage q/q SAAR growth (`qoq_saar_growth_alfred_*`) using same-vintage q and q-1
+levels. The written release file is intentionally KPI-focused: it keeps ALFRED
+stage SAAR columns plus level inputs needed to reconstruct those growth values.
 """
 
 from __future__ import annotations
@@ -62,6 +55,11 @@ STAGE_QOQ_SAAR_ALFRED_COLS = {
     "second": "qoq_saar_growth_alfred_second_pct",
     "third": "qoq_saar_growth_alfred_third_pct",
 }
+STAGE_ALFRED_PREV_LEVEL_COLS = {
+    "first": "alfred_prev_level_first",
+    "second": "alfred_prev_level_second",
+    "third": "alfred_prev_level_third",
+}
 DEFAULT_SPIKE_SHOCK_WHITELIST = {"2020Q2", "2020Q3"}
 
 
@@ -69,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Download ALFRED vintage data and build first/second/third release "
-            "dataset with panel-vintage-consistent realtime q/q SAAR growth columns."
+            "dataset with ALFRED q/q SAAR KPI columns and supporting ALFRED levels."
         )
     )
     parser.add_argument("--series", default="GDPC1", help="ALFRED series ID (default: GDPC1).")
@@ -485,10 +483,14 @@ def _compute_alfred_stage_growth_from_wide(
     """Compute stage growth from ALFRED release vintages using same-vintage q and q-1 levels."""
     out = out.copy()
     growth_cols = [*STAGE_QOQ_ALFRED_COLS.values(), *STAGE_QOQ_SAAR_ALFRED_COLS.values()]
+    prev_level_cols = [*STAGE_ALFRED_PREV_LEVEL_COLS.values()]
     out = out.drop(columns=growth_cols, errors="ignore")
+    out = out.drop(columns=prev_level_cols, errors="ignore")
 
     if not vintage_cols:
         for col in growth_cols:
+            out[col] = np.nan
+        for col in prev_level_cols:
             out[col] = np.nan
         return out
 
@@ -500,6 +502,8 @@ def _compute_alfred_stage_growth_from_wide(
 
     if levels.empty:
         for col in growth_cols:
+            out[col] = np.nan
+        for col in prev_level_cols:
             out[col] = np.nan
         return out
 
@@ -540,11 +544,73 @@ def _compute_alfred_stage_growth_from_wide(
         ratio = np.where(valid, y_q / y_qm1, np.nan)
         out[STAGE_QOQ_ALFRED_COLS[stage]] = np.where(valid, (ratio - 1.0) * 100.0, np.nan)
         out[STAGE_QOQ_SAAR_ALFRED_COLS[stage]] = np.where(valid, (ratio**4 - 1.0) * 100.0, np.nan)
+        out[STAGE_ALFRED_PREV_LEVEL_COLS[stage]] = y_qm1
 
     for col in growth_cols:
         if col not in out.columns:
             out[col] = np.nan
+    for col in prev_level_cols:
+        if col not in out.columns:
+            out[col] = np.nan
     return out
+
+
+def _format_release_output_for_alfred_qoq_saar(releases_df: pd.DataFrame) -> pd.DataFrame:
+    """Keep ALFRED SAAR KPI columns and ALFRED levels used to construct them."""
+    out = releases_df.copy()
+
+    # Backfill missing previous-quarter ALFRED levels from stage level + SAAR growth when needed.
+    for stage in STAGES:
+        prev_col = STAGE_ALFRED_PREV_LEVEL_COLS[stage]
+        if prev_col in out.columns:
+            continue
+        level_col = STAGE_RELEASE_LEVEL_COLS[stage]
+        saar_col = STAGE_QOQ_SAAR_ALFRED_COLS[stage]
+        if level_col not in out.columns or saar_col not in out.columns:
+            out[prev_col] = np.nan
+            continue
+        y_q = pd.to_numeric(out[level_col], errors="coerce")
+        g_saar = pd.to_numeric(out[saar_col], errors="coerce")
+        base = 1.0 + (g_saar / 100.0)
+        ratio = np.where(base > 0.0, np.power(base, 0.25), np.nan)
+        valid = (
+            np.isfinite(y_q.to_numpy(dtype=float))
+            & np.isfinite(ratio)
+            & (ratio != 0.0)
+        )
+        prev = np.full(len(out), np.nan, dtype=float)
+        y_q_arr = y_q.to_numpy(dtype=float)
+        prev[valid] = y_q_arr[valid] / ratio[valid]
+        out[prev_col] = prev
+
+    # Remove all qoq/qoq_saar derivatives except ALFRED stage SAAR KPI columns.
+    keep_growth = set(STAGE_QOQ_SAAR_ALFRED_COLS.values())
+    drop_growth = [col for col in out.columns if col.startswith("qoq_") and col not in keep_growth]
+    out = out.drop(columns=drop_growth, errors="ignore")
+
+    ordered_cols = [
+        "observation_date",
+        "first_release_date",
+        "first_release",
+        STAGE_ALFRED_PREV_LEVEL_COLS["first"],
+        STAGE_QOQ_SAAR_ALFRED_COLS["first"],
+        "second_release_date",
+        "second_release",
+        STAGE_ALFRED_PREV_LEVEL_COLS["second"],
+        STAGE_QOQ_SAAR_ALFRED_COLS["second"],
+        "third_release_date",
+        "third_release",
+        STAGE_ALFRED_PREV_LEVEL_COLS["third"],
+        STAGE_QOQ_SAAR_ALFRED_COLS["third"],
+        "latest_release_date",
+        "latest_release",
+        "latest_prev_release",
+        "first_release_lag_days",
+        "second_release_lag_days",
+        "third_release_lag_days",
+    ]
+    present_cols = [col for col in ordered_cols if col in out.columns]
+    return out[present_cols].copy()
 
 
 def build_release_dataset(
@@ -875,9 +941,6 @@ def main() -> int:
         vintage_select=args.vintage_select,
     )
 
-    releases.to_csv(out_csv, index=False)
-    print(f"Wrote CSV: {out_csv} ({len(releases)} rows)")
-
     validation_summary = {"spike_flags": 0}
     if args.validate:
         _, validation_summary = validate_release_table(
@@ -894,12 +957,16 @@ def main() -> int:
             )
             return 2
 
+    export_df = _format_release_output_for_alfred_qoq_saar(releases_df=releases)
+    export_df.to_csv(out_csv, index=False)
+    print(f"Wrote CSV: {out_csv} ({len(export_df)} rows)")
+
     if args.output_parquet:
         out_parquet = Path(args.output_parquet).expanduser().resolve()
         out_parquet.parent.mkdir(parents=True, exist_ok=True)
         try:
-            releases.to_parquet(out_parquet, index=False)
-            print(f"Wrote parquet: {out_parquet} ({len(releases)} rows)")
+            export_df.to_parquet(out_parquet, index=False)
+            print(f"Wrote parquet: {out_parquet} ({len(export_df)} rows)")
         except Exception as exc:  # pragma: no cover
             print(f"Failed to write parquet to {out_parquet}: {exc}", file=sys.stderr)
             return 2

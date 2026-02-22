@@ -11,6 +11,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.build_gdp_releases import (  # noqa: E402
+    STAGE_ALFRED_PREV_LEVEL_COLS,
+    STAGE_QOQ_SAAR_ALFRED_COLS,
+    _format_release_output_for_alfred_qoq_saar,
     build_release_dataset,
     load_qd_vintage_series_panel,
     validate_release_table,
@@ -106,6 +109,50 @@ def test_reindex_break_regression_uses_same_vintage_for_numerator_and_denominato
 
     # New method uses one panel snapshot (v1) for both q and q-1, avoiding the break.
     assert np.isclose(float(out.loc[1, "qoq_saar_growth_realtime_first_pct"]), 0.0)
+
+
+def test_format_release_output_keeps_only_alfred_saar_growth_and_alfred_levels() -> None:
+    wide = pd.DataFrame(
+        {
+            "observation_date": ["2024-01-01", "2024-04-01"],
+            "GDPC1_20240425": [100.0, np.nan],
+            "GDPC1_20240530": [101.0, 110.0],
+            "GDPC1_20240627": [102.0, 111.0],
+            "GDPC1_20240725": [103.0, 112.0],
+        }
+    )
+    qd_panel = pd.DataFrame(
+        {
+            "vintage": ["2024-06", "2024-06", "2024-07", "2024-07", "2024-08", "2024-08"],
+            "vintage_timestamp": pd.to_datetime(
+                ["2024-06-01", "2024-06-01", "2024-07-01", "2024-07-01", "2024-08-01", "2024-08-01"]
+            ),
+            "quarter": pd.PeriodIndex(["2024Q1", "2024Q2", "2024Q1", "2024Q2", "2024Q1", "2024Q2"], freq="Q-DEC"),
+            "quarter_ord": pd.PeriodIndex(["2024Q1", "2024Q2", "2024Q1", "2024Q2", "2024Q1", "2024Q2"], freq="Q-DEC").astype(
+                "int64"
+            ),
+            "value": [101.0, 110.0, 102.0, 111.0, 103.0, 112.0],
+        }
+    )
+
+    full = build_release_dataset(wide=wide, series="GDPC1", qd_panel=qd_panel, vintage_select="next")
+    out = _format_release_output_for_alfred_qoq_saar(full)
+
+    growth_cols = [c for c in out.columns if c.startswith("qoq_")]
+    assert set(growth_cols) == set(STAGE_QOQ_SAAR_ALFRED_COLS.values())
+    assert "qoq_saar_growth_realtime_first_pct" not in out.columns
+    assert "qoq_growth_alfred_first_pct" not in out.columns
+    assert "qoq_saar_growth_latest_pct" not in out.columns
+
+    for col in STAGE_ALFRED_PREV_LEVEL_COLS.values():
+        assert col in out.columns
+
+    prev_col = STAGE_ALFRED_PREV_LEVEL_COLS["first"]
+    saar_col = STAGE_QOQ_SAAR_ALFRED_COLS["first"]
+    y_q = float(out.loc[1, "first_release"])
+    y_prev = float(out.loc[1, prev_col])
+    expected = _saar(y_q, y_prev)
+    assert np.isclose(float(out.loc[1, saar_col]), expected)
 
 
 def test_validation_smoke_no_2023_q2_q3_spike_flags_with_panel_growth(tmp_path: Path) -> None:
