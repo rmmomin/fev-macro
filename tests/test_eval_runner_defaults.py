@@ -11,7 +11,13 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from fev_macro.data import exclude_years
-from fev_macro.eval_runner import _apply_profile_defaults, build_eval_arg_parser, parse_args_with_provenance
+from fev_macro.eval_runner import (
+    _apply_profile_defaults,
+    _resolve_eval_release_metric,
+    _resolve_eval_release_stages,
+    build_eval_arg_parser,
+    parse_args_with_provenance,
+)
 
 
 def test_eval_parser_does_not_exclude_2020_by_default() -> None:
@@ -71,6 +77,20 @@ def test_standard_profile_defaults_match_contract() -> None:
     _apply_profile_defaults(args_processed, covariate_mode="processed")
     assert args_processed.horizons == [1, 2, 4]
     assert args_processed.num_windows == 40
+    assert args_processed.target_transform == "saar_growth"
     assert "chronos2" not in args_processed.models
     assert "ensemble_avg_top3" not in args_processed.models
     assert "ensemble_weighted_top5" not in args_processed.models
+
+
+def test_auto_release_metric_defaults_to_alfred_qoq_saar_for_saar_growth() -> None:
+    assert _resolve_eval_release_metric("auto", "saar_growth") == "alfred_qoq_saar"
+
+
+def test_alfred_qoq_saar_default_stage_is_first() -> None:
+    stages = _resolve_eval_release_stages(
+        eval_release_metric="alfred_qoq_saar",
+        eval_release_stage=None,
+        eval_release_stages=None,
+    )
+    assert stages == ["first"]

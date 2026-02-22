@@ -41,6 +41,11 @@ RELEASE_STAGE_TO_ALFRED_QOQ_COLUMN: dict[str, str] = {
     "second": "qoq_growth_alfred_second_pct",
     "third": "qoq_growth_alfred_third_pct",
 }
+RELEASE_STAGE_TO_ALFRED_QOQ_SAAR_COLUMN: dict[str, str] = {
+    "first": "qoq_saar_growth_alfred_first_pct",
+    "second": "qoq_saar_growth_alfred_second_pct",
+    "third": "qoq_saar_growth_alfred_third_pct",
+}
 
 
 def _default_qd_panel_candidates(covariate_mode: Literal["unprocessed", "processed"]) -> tuple[Path, ...]:
@@ -811,7 +816,14 @@ def format_gdp_item_id(
     stage_norm = str(release_stage).strip().lower()
     transform_norm = str(target_transform).strip().lower()
 
-    if metric_norm in {"realtime_qoq_saar", "realtime_saar", "realtime_qoq_saar_pct"}:
+    if metric_norm in {
+        "realtime_qoq_saar",
+        "realtime_saar",
+        "realtime_qoq_saar_pct",
+        "alfred_qoq_saar",
+        "alfred_saar",
+        "bea_qoq_saar",
+    }:
         return f"{base_norm}_qoq_saar_{stage_norm}_pct"
     if metric_norm in {"alfred_qoq", "alfred_growth_qoq", "bea_qoq"}:
         return f"{base_norm}_qoq_{stage_norm}_pct"
@@ -837,6 +849,13 @@ def apply_gdpc1_release_truth_target(
                 f"got stage={stage!r}."
             )
         stage_col = RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN[stage]
+    elif metric_kind == "alfred_qoq_saar":
+        if stage not in RELEASE_STAGE_TO_ALFRED_QOQ_SAAR_COLUMN:
+            raise ValueError(
+                "ALFRED q/q SAAR release metric supports stages first/second/third only; "
+                f"got stage={stage!r}."
+            )
+        stage_col = RELEASE_STAGE_TO_ALFRED_QOQ_SAAR_COLUMN[stage]
     elif metric_kind == "alfred_qoq":
         if stage not in RELEASE_STAGE_TO_ALFRED_QOQ_COLUMN:
             raise ValueError(
@@ -874,7 +893,7 @@ def apply_gdpc1_release_truth_target(
     out["quarter"] = pd.PeriodIndex(out["timestamp"], freq="Q-DEC")
 
     mapped_values = pd.to_numeric(out["quarter"].map(release_levels_by_quarter), errors="coerce")
-    if metric_kind in {"realtime_qoq_saar", "alfred_qoq"}:
+    if metric_kind in {"realtime_qoq_saar", "alfred_qoq", "alfred_qoq_saar"}:
         # Values are already growth percent and can be used directly as the target.
         out["target"] = mapped_values.astype(float)
     else:
@@ -892,8 +911,9 @@ def apply_gdpc1_release_truth_target(
     rows_with_release_target = int(np.isfinite(out["target"].to_numpy(dtype=float)).sum())
     out = out.drop(columns=["quarter"])
     out = _drop_invalid_and_fill_covariates(out=out, covariate_columns=covariate_columns)
+    out, contiguous_rows_dropped = _trim_to_longest_contiguous_quarter_block(out=out)
 
-    if metric_kind == "realtime_qoq_saar" or target_transform == "saar_growth":
+    if metric_kind in {"realtime_qoq_saar", "alfred_qoq_saar"} or target_transform == "saar_growth":
         target_units = "pct_qoq_saar"
     elif metric_kind == "alfred_qoq" or target_transform == "qoq_growth":
         target_units = "pct_qoq"
@@ -913,6 +933,7 @@ def apply_gdpc1_release_truth_target(
         "release_csv_path": str(csv_path),
         "release_quarters_available": int(len(release_levels_by_quarter)),
         "rows_with_release_target": rows_with_release_target,
+        "rows_dropped_for_contiguity": int(contiguous_rows_dropped),
     }
 
 
@@ -1389,13 +1410,18 @@ def _normalize_release_metric(metric: str) -> str:
     aliases = {
         "realtime_saar": "realtime_qoq_saar",
         "realtime_qoq_saar_pct": "realtime_qoq_saar",
+        "alfred_saar": "alfred_qoq_saar",
+        "alfred_growth_saar": "alfred_qoq_saar",
+        "alfred_growth_qoq_saar": "alfred_qoq_saar",
+        "qoq_saar_alfred": "alfred_qoq_saar",
+        "bea_qoq_saar": "alfred_qoq_saar",
         "alfred_growth": "alfred_qoq",
         "alfred_growth_qoq": "alfred_qoq",
         "qoq_alfred": "alfred_qoq",
         "bea_qoq": "alfred_qoq",
     }
     metric_norm = aliases.get(metric_norm, metric_norm)
-    allowed = {"level", "realtime_qoq_saar", "alfred_qoq"}
+    allowed = {"level", "realtime_qoq_saar", "alfred_qoq", "alfred_qoq_saar"}
     if metric_norm not in allowed:
         raise ValueError(
             f"Unsupported release_metric={metric!r}. "
@@ -1537,6 +1563,53 @@ def _drop_invalid_and_fill_covariates(
         out[cov] = _impute_covariate_series(out[cov], covariate_mode=resolved_covariate_mode)
 
     return out
+
+
+def _trim_to_longest_contiguous_quarter_block(out: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Keep only the longest contiguous quarterly block in a target frame.
+
+    This avoids irregular-frequency failures in downstream evaluation when a release metric
+    has sparse historical gaps (for example, an isolated quarter with missing benchmark truth).
+    """
+    if out.empty:
+        return out, 0
+
+    work = out.copy()
+    work["timestamp"] = pd.to_datetime(work["timestamp"], errors="coerce")
+    work = work.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    if work.empty:
+        return work, 0
+    if len(work) < 20:
+        # Keep short series unchanged; trimming is only needed for long benchmark histories.
+        return work, 0
+
+    quarter_ord = pd.PeriodIndex(work["timestamp"], freq="Q-DEC").astype("int64")
+    block_break = pd.Series(quarter_ord).diff().fillna(1) != 1
+    work["_contig_block"] = block_break.astype(int).cumsum()
+
+    block_sizes = work.groupby("_contig_block", sort=False).size()
+    if len(block_sizes) <= 1:
+        return work.drop(columns=["_contig_block"]), 0
+
+    max_size = int(block_sizes.max())
+    candidates = block_sizes[block_sizes == max_size].index.tolist()
+    if len(candidates) == 1:
+        keep_block = int(candidates[0])
+    else:
+        # Tie-break toward the most recent contiguous block.
+        keep_block = int(
+            max(
+                candidates,
+                key=lambda block: pd.to_datetime(
+                    work.loc[work["_contig_block"] == block, "timestamp"],
+                    errors="coerce",
+                ).max(),
+            )
+        )
+
+    trimmed = work.loc[work["_contig_block"] == keep_block].copy().drop(columns=["_contig_block"])
+    dropped = int(len(work) - len(trimmed))
+    return trimmed.reset_index(drop=True), dropped
 
 
 def _normalize_covariate_mode(mode: str) -> Literal["unprocessed", "processed"]:

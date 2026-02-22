@@ -15,6 +15,7 @@ from .data import (
     DEFAULT_SOURCE_SERIES_CANDIDATES,
     DEFAULT_TARGET_SERIES_NAME,
     RELEASE_STAGE_TO_ALFRED_QOQ_COLUMN,
+    RELEASE_STAGE_TO_ALFRED_QOQ_SAAR_COLUMN,
     HistoricalQuarterlyVintageProvider,
     RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN,
     SUPPORTED_TARGET_TRANSFORMS,
@@ -232,7 +233,7 @@ def build_eval_arg_parser(
     parser.add_argument(
         "--eval_release_metric",
         type=str,
-        choices=["auto", "alfred_qoq", "realtime_qoq_saar", "level"],
+        choices=["auto", "alfred_qoq", "alfred_qoq_saar", "realtime_qoq_saar", "level"],
         default="auto",
         help="Release-table column family used for truth. 'auto' infers from target transform.",
     )
@@ -256,7 +257,7 @@ def build_eval_arg_parser(
         default=None,
         help=(
             "Release stages to evaluate. "
-            "Default is first/second/third for alfred_qoq/realtime_qoq_saar and first for level."
+            "Default is first for alfred_qoq_saar/level and first/second/third for alfred_qoq/realtime_qoq_saar."
         ),
     )
     parser.add_argument(
@@ -328,6 +329,11 @@ def run_eval_pipeline(
     if eval_release_metric == "realtime_qoq_saar" and target_transform != "saar_growth":
         raise ValueError(
             "--eval_release_metric realtime_qoq_saar requires --target_transform saar_growth "
+            "to keep training targets and evaluation truth on the same scale."
+        )
+    if eval_release_metric == "alfred_qoq_saar" and target_transform != "saar_growth":
+        raise ValueError(
+            "--eval_release_metric alfred_qoq_saar requires --target_transform saar_growth "
             "to keep training targets and evaluation truth on the same scale."
         )
     if eval_release_metric == "alfred_qoq" and target_transform != "qoq_growth":
@@ -979,6 +985,7 @@ def validate_y_true_matches_release_table(
 
     metric_to_stage_column: dict[str, dict[str, str]] = {
         "realtime_qoq_saar": RELEASE_STAGE_TO_REALTIME_SAAR_COLUMN,
+        "alfred_qoq_saar": RELEASE_STAGE_TO_ALFRED_QOQ_SAAR_COLUMN,
         "alfred_qoq": RELEASE_STAGE_TO_ALFRED_QOQ_COLUMN,
     }
     eval_rows = records_df.copy()
@@ -986,7 +993,7 @@ def validate_y_true_matches_release_table(
         eval_rows["release_metric"] = eval_rows["release_metric"].astype(str).str.strip().str.lower()
         eval_rows = eval_rows.loc[eval_rows["release_metric"].isin(metric_to_stage_column)].copy()
         if eval_rows.empty:
-            print("Truth check skipped: no realtime_qoq_saar/alfred_qoq prediction rows.")
+            print("Truth check skipped: no realtime_qoq_saar/alfred_qoq_saar/alfred_qoq prediction rows.")
             return {}
         metric_kinds = list(dict.fromkeys(eval_rows["release_metric"].tolist()))
     else:
@@ -1255,9 +1262,9 @@ def _resolve_eval_release_metric(requested_metric: str, target_transform: str) -
         if target_transform == "qoq_growth":
             return "alfred_qoq"
         if target_transform == "saar_growth":
-            return "realtime_qoq_saar"
+            return "alfred_qoq_saar"
         return "level"
-    if metric_norm not in {"alfred_qoq", "realtime_qoq_saar", "level"}:
+    if metric_norm not in {"alfred_qoq", "alfred_qoq_saar", "realtime_qoq_saar", "level"}:
         raise ValueError(f"Unsupported eval_release_metric={requested_metric!r}")
     return metric_norm
 
@@ -1273,10 +1280,13 @@ def _resolve_eval_release_stages(
     elif eval_release_stages:
         stages = [str(s).strip().lower() for s in eval_release_stages]
     else:
-        stages = ["first", "second", "third"] if eval_release_metric in {"alfred_qoq", "realtime_qoq_saar"} else ["first"]
+        if eval_release_metric == "alfred_qoq_saar":
+            stages = ["first"]
+        else:
+            stages = ["first", "second", "third"] if eval_release_metric in {"alfred_qoq", "realtime_qoq_saar"} else ["first"]
 
     stages = list(dict.fromkeys(stages))
-    if eval_release_metric in {"alfred_qoq", "realtime_qoq_saar"}:
+    if eval_release_metric in {"alfred_qoq", "alfred_qoq_saar", "realtime_qoq_saar"}:
         invalid = [s for s in stages if s not in {"first", "second", "third"}]
         if invalid:
             raise ValueError(
@@ -1399,7 +1409,7 @@ def _apply_profile_defaults(args: argparse.Namespace, covariate_mode: CovariateM
             _set_if_not_provided("num_windows", 60)
             _set_if_not_provided("models", list(UNPROCESSED_STANDARD_MODELS))
         else:
-            _set_if_not_provided("target_transform", "qoq_growth")
+            _set_if_not_provided("target_transform", "saar_growth")
             _set_if_not_provided("num_windows", 40)
             _set_if_not_provided("models", list(PROCESSED_STANDARD_MODELS))
 

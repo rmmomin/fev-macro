@@ -25,17 +25,23 @@ make eval-processed-standard
 | Mode | Covariates | Training objective | KPI for comparison |
 |---|---|---|---|
 | `unprocessed` | Raw vintage covariates | `log_level` (LL) | q/q SAAR real GDP growth vs ALFRED release truth |
-| `processed` | Transform-code + MD outlier/trimming processed covariates | `qoq_growth` (G) | q/q real GDP growth vs BEA-verified ALFRED release truth (`qoq_growth_alfred_*`) |
+| `processed` | Transform-code + MD outlier/trimming processed covariates | `saar_growth` (G) | q/q SAAR real GDP growth vs BEA-verified ALFRED first-vintage truth (`qoq_saar_growth_alfred_first_pct`) |
 
 Details: [`docs/data_processing.md`](docs/data_processing.md)
 
 ## Models included
-Core baselines and multivariate models include `naive_last`, `mean`, `drift`, `ar4`, `auto_arima`, `auto_ets`, `theta`, `local_trend_ssm`, `random_forest`, `xgboost`, `factor_pca_qd`, `mixed_freq_dfm_md`, `bvar_minnesota_8`, `bvar_minnesota_20`, `bvar_minnesota_growth_8`, `bvar_minnesota_growth_20`, and `chronos2` (plus optional ensemble variants).
+Core baselines and multivariate models include `naive_last`, `mean`, `drift`, `ar4`, `auto_arima`, `auto_ets`, `theta`, `local_trend_ssm`, `random_forest`, `xgboost`, `factor_pca_qd`, `mixed_freq_dfm_md`, `bvar_minnesota_8`, `bvar_minnesota_20`, `bvar_minnesota_growth_8`, `bvar_minnesota_growth_20`, `chronos2`, and opt-in LSTM variants `lstm_univariate` / `lstm_multivariate` (plus optional ensemble variants).
+
+LSTM variants require PyTorch (`torch>=2.2.0`) and are intentionally opt-in (not part of default model sets).
+
+```bash
+python scripts/run_eval_processed.py --models lstm_univariate lstm_multivariate --num_windows 20
+```
 
 Full model catalog: [`docs/models.md`](docs/models.md)
 
 ## Real-time evaluation policy
-**By default, every rolling window trains on an as-of vintage (vintage-correct). Snapshot evaluation is blocked unless you explicitly pass `--allow_snapshot_eval`.** For processed `run_eval`, release truth defaults to BEA-verified ALFRED q/q growth from `data/panels/gdpc1_releases_first_second_third.csv`, using `qoq_growth_alfred_first_pct`, `qoq_growth_alfred_second_pct`, and `qoq_growth_alfred_third_pct` (`--eval_release_metric alfred_qoq`, `--target_transform qoq_growth`). Realtime SAAR truth remains available via `--eval_release_metric realtime_qoq_saar --target_transform saar_growth`.
+**By default, every rolling window trains on an as-of vintage (vintage-correct). Snapshot evaluation is blocked unless you explicitly pass `--allow_snapshot_eval`.** For processed `run_eval`, release truth defaults to BEA-verified ALFRED q/q SAAR first-vintage growth from `data/panels/gdpc1_releases_first_second_third.csv` (`qoq_saar_growth_alfred_first_pct`) via `--eval_release_metric alfred_qoq_saar --eval_release_stages first --target_transform saar_growth`. ALFRED q/q non-SAAR truth remains available via `--eval_release_metric alfred_qoq --target_transform qoq_growth`, and realtime SAAR truth remains available via `--eval_release_metric realtime_qoq_saar --target_transform saar_growth`.
 
 ## Latest-vintage one-shot forecast + 2025Q4 comparison
 ```bash

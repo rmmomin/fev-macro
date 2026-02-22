@@ -90,6 +90,43 @@ def test_truth_item_id_matches_alfred_qoq_first_release(tmp_path: Path) -> None:
     )
 
 
+def test_truth_item_id_matches_alfred_qoq_saar_first_release(tmp_path: Path) -> None:
+    release_csv = tmp_path / "gdpc1_releases.csv"
+    pd.DataFrame(
+        {
+            "observation_date": ["2024-01-01", "2024-04-01", "2024-07-01"],
+            "first_release": [100.0, 110.0, 121.0],
+            "second_release": [100.5, 110.5, 121.5],
+            "third_release": [101.0, 111.0, 122.0],
+            "latest_release": [102.0, 112.0, 123.0],
+            "qoq_saar_growth_alfred_first_pct": [1.1, 2.2, 3.3],
+            "qoq_saar_growth_alfred_second_pct": [1.0, 2.0, 3.0],
+            "qoq_saar_growth_alfred_third_pct": [0.9, 1.9, 2.9],
+        }
+    ).to_csv(release_csv, index=False)
+
+    base_df, _ = build_release_target_scaffold(
+        release_csv_path=release_csv,
+        target_series_name="LOG_REAL_GDP",
+    )
+    out, meta = apply_gdpc1_release_truth_target(
+        dataset_df=base_df,
+        release_csv_path=release_csv,
+        release_stage="first",
+        release_metric="alfred_qoq_saar",
+        target_transform="saar_growth",
+    )
+
+    assert out["item_id"].nunique() == 1
+    assert str(out["item_id"].iloc[0]) == "gdpc1_qoq_saar_first_pct"
+    assert meta["item_id"] == "gdpc1_qoq_saar_first_pct"
+    assert meta["target_units"] == "pct_qoq_saar"
+    assert np.allclose(
+        out["target"].to_numpy(dtype=float),
+        np.array([1.1, 2.2, 3.3], dtype=float),
+    )
+
+
 def test_validate_y_true_matches_release_table_for_realtime_stages(tmp_path: Path) -> None:
     release_csv = tmp_path / "gdpc1_releases.csv"
     pd.DataFrame(
@@ -172,6 +209,60 @@ def test_validate_y_true_matches_release_table_for_alfred_qoq_stages(tmp_path: P
             release_stage=stage,
             release_metric="alfred_qoq",
             target_transform="qoq_growth",
+        )
+        for _, rec in stage_df.iterrows():
+            rows.append(
+                {
+                    "task_name": f"gdp_{stage}_h1",
+                    "timestamp": rec["timestamp"],
+                    "y_true": float(rec["target"]),
+                    "release_stage": stage,
+                    "release_metric": meta["release_metric"],
+                }
+            )
+
+    records_df = pd.DataFrame(rows)
+    stats = validate_y_true_matches_release_table(
+        records_df=records_df,
+        release_csv_path=release_csv,
+        tolerance=1e-12,
+        strict=True,
+    )
+
+    assert set(stats.keys()) == {"first", "second", "third"}
+    for stage in ("first", "second", "third"):
+        assert stats[stage]["num_bad"] == 0
+        assert float(stats[stage]["max_abs_diff"]) == 0.0
+
+
+def test_validate_y_true_matches_release_table_for_alfred_qoq_saar_stages(tmp_path: Path) -> None:
+    release_csv = tmp_path / "gdpc1_releases.csv"
+    pd.DataFrame(
+        {
+            "observation_date": ["2024-01-01", "2024-04-01", "2024-07-01"],
+            "first_release": [100.0, 110.0, 121.0],
+            "second_release": [100.5, 110.5, 121.5],
+            "third_release": [101.0, 111.0, 122.0],
+            "latest_release": [102.0, 112.0, 123.0],
+            "qoq_saar_growth_alfred_first_pct": [1.1, 2.2, 3.3],
+            "qoq_saar_growth_alfred_second_pct": [1.0, 2.0, 3.0],
+            "qoq_saar_growth_alfred_third_pct": [0.9, 1.9, 2.9],
+        }
+    ).to_csv(release_csv, index=False)
+
+    base_df, _ = build_release_target_scaffold(
+        release_csv_path=release_csv,
+        target_series_name="LOG_REAL_GDP",
+    )
+
+    rows: list[dict[str, object]] = []
+    for stage in ("first", "second", "third"):
+        stage_df, meta = apply_gdpc1_release_truth_target(
+            dataset_df=base_df,
+            release_csv_path=release_csv,
+            release_stage=stage,
+            release_metric="alfred_qoq_saar",
+            target_transform="saar_growth",
         )
         for _, rec in stage_df.iterrows():
             rows.append(
