@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal, Sequence, cast
 
+from .models import normalize_model_names
+
 RealtimeMode = Literal["unprocessed", "processed"]
 
 SUPPORTED_REALTIME_MODES = {"unprocessed", "processed"}
@@ -98,8 +100,9 @@ def resolve_md_panel_path(mode: RealtimeMode, explicit_path: str | None = None) 
 
 def resolve_models(mode: RealtimeMode, requested_models: Sequence[str] | None) -> list[str]:
     if requested_models:
-        return _dedupe([str(m).strip() for m in requested_models if str(m).strip()])
-    return list(DEFAULT_MODELS_BY_MODE[mode])
+        cleaned = [str(m).strip() for m in requested_models if str(m).strip()]
+        return normalize_model_names(cleaned)
+    return normalize_model_names(DEFAULT_MODELS_BY_MODE[mode])
 
 
 def resolve_baseline_model(mode: RealtimeMode, explicit_baseline: str | None) -> str:
@@ -118,17 +121,6 @@ def resolve_oos_output_dir(mode: RealtimeMode, explicit_dir: str | None = None) 
     if explicit_dir:
         return Path(explicit_dir).expanduser().resolve()
     return DEFAULT_REALTIME_OOS_OUTPUT_DIRS[mode].resolve()
-
-
-def _dedupe(values: Sequence[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        out.append(value)
-    return out
 
 
 __all__ = [

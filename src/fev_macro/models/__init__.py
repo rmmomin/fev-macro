@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
 from .ar_models import AR4Model
 from .base import BaseModel
@@ -23,6 +23,9 @@ from .statsforecast_models import AutoARIMAModel, AutoETSModel, ThetaModel
 from .xgboost_model import XGBoostModel
 
 ModelBuilder = Callable[[int], BaseModel]
+MODEL_NAME_ALIASES: dict[str, str] = {
+    "gdpnow": "atlantafed_gdpnow",
+}
 
 
 def _no_seed(factory: Callable[[], BaseModel]) -> ModelBuilder:
@@ -68,8 +71,27 @@ def register_model(name: str, builder: ModelBuilder) -> None:
     MODEL_REGISTRY[name] = builder
 
 
-def available_models() -> list[str]:
-    return sorted(MODEL_REGISTRY.keys())
+def canonicalize_model_name(name: str) -> str:
+    key = str(name).strip().lower()
+    return MODEL_NAME_ALIASES.get(key, key)
+
+
+def normalize_model_names(model_names: Sequence[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in model_names:
+        canonical = canonicalize_model_name(str(name))
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        out.append(canonical)
+    return out
+
+
+def available_models(*, include_aliases: bool = False) -> list[str]:
+    if include_aliases:
+        return sorted(MODEL_REGISTRY.keys())
+    return sorted(normalize_model_names(MODEL_REGISTRY.keys()))
 
 
 def build_models(model_names: list[str], seed: int = 0) -> dict[str, BaseModel]:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Literal, Sequence, cast
 
+from .models import normalize_model_names
+
 MODELS_LL_UNPROCESSED: list[str] = [
     "naive_last",
     "atlantafed_gdpnow",
@@ -48,14 +50,15 @@ def resolve_model_names(
     model_set: Literal["auto", "ll", "g"] = "auto",
 ) -> list[str]:
     if requested_models:
-        return list(dict.fromkeys([str(m).strip() for m in requested_models if str(m).strip()]))
+        cleaned = [str(m).strip() for m in requested_models if str(m).strip()]
+        return normalize_model_names(cleaned)
 
     mode = _normalize_model_set(model_set)
     if mode == "auto":
         mode = "ll" if covariate_mode == "unprocessed" else "g"
 
     defaults = MODELS_LL_UNPROCESSED if mode == "ll" else MODELS_G_PROCESSED
-    return list(defaults)
+    return normalize_model_names(defaults)
 
 
 def _normalize_model_set(value: str) -> Literal["auto", "ll", "g"]:
