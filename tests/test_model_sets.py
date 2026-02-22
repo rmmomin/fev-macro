@@ -15,6 +15,7 @@ def test_auto_model_set_unprocessed_uses_ll_defaults() -> None:
     names = resolve_model_names(None, covariate_mode="unprocessed", model_set="auto")
     assert "drift" in names
     assert "auto_ets" in names
+    assert "atlantafed_gdpnow" in names
     assert "bvar_minnesota_8" in names
 
 
@@ -22,4 +23,5 @@ def test_auto_model_set_processed_uses_growth_defaults() -> None:
     names = resolve_model_names(None, covariate_mode="processed", model_set="auto")
     assert "bvar_minnesota_growth_8" in names
     assert "bvar_minnesota_growth_20" in names
+    assert "atlantafed_gdpnow" in names
     assert "auto_arima" in names

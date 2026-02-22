@@ -4,6 +4,7 @@ from typing import Literal, Sequence, cast
 
 MODELS_LL_UNPROCESSED: list[str] = [
     "naive_last",
+    "atlantafed_gdpnow",
     "mean",
     "drift",
     "seasonal_naive",
@@ -23,6 +24,7 @@ MODELS_LL_UNPROCESSED: list[str] = [
 
 MODELS_G_PROCESSED: list[str] = [
     "naive_last",
+    "atlantafed_gdpnow",
     "mean",
     "ar4",
     "auto_arima",

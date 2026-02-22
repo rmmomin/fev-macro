@@ -69,6 +69,7 @@ SMOKE_PROFILE_MODELS: list[str] = [
 
 UNPROCESSED_STANDARD_MODELS: list[str] = [
     "naive_last",
+    "atlantafed_gdpnow",
     "drift",
     "auto_arima",
     "theta",
@@ -83,6 +84,7 @@ UNPROCESSED_STANDARD_MODELS: list[str] = [
 
 PROCESSED_STANDARD_MODELS: list[str] = [
     "naive_last",
+    "atlantafed_gdpnow",
     "mean",
     "ar4",
     "auto_arima",
@@ -102,6 +104,11 @@ TASK_META_FIELDS: tuple[str, ...] = (
     "covariate_mode",
     "dataset_path",
 )
+COVID_EXCLUDED_QUARTERS: tuple[pd.Period, ...] = (
+    pd.Period("2020Q2", freq="Q-DEC"),
+    pd.Period("2020Q3", freq="Q-DEC"),
+)
+POINT_ERROR_METRIC_COLUMNS: tuple[str, ...] = ("MAE", "MSE", "RMSE")
 
 
 def build_eval_arg_parser(
@@ -784,12 +791,17 @@ def run_eval_pipeline(
             print("Top 10 slowest models by total inference time (seconds):")
             print(slow_models.to_string(index=False))
 
-    if not leaderboard_df.empty and metric_col in leaderboard_df.columns:
-        display_cols = [
-            c for c in ["model_name", metric_col, "win_rate", "skill_vs_baseline"] if c in leaderboard_df.columns
-        ]
-        print("Top leaderboard rows:")
-        print(leaderboard_df[display_cols].head(10).to_string(index=False))
+    if not leaderboard_df.empty:
+        rank_col = "RMSE_ex_covid" if "RMSE_ex_covid" in leaderboard_df.columns else metric_col
+        if rank_col in leaderboard_df.columns:
+            print(f"Top leaderboard rows (ranked by {rank_col}):")
+            display_cols = [
+                c
+                for c in ["model_name", rank_col, "RMSE", "MAE_ex_covid", "MAE", "win_rate", "skill_score"]
+                if c in leaderboard_df.columns
+            ]
+            if display_cols:
+                print(leaderboard_df[display_cols].head(10).to_string(index=False))
 
     if not pairwise_df.empty:
         print("Top pairwise rows:")
@@ -935,16 +947,26 @@ def _augment_leaderboard_with_point_error_metrics(
         return out
 
     metrics_df = _compute_point_error_metrics(records_df=records_df)
-    if metrics_df.empty:
-        for col in ("MAE", "MSE", "RMSE"):
+    metrics_ex_covid_df = _compute_point_error_metrics(records_df=records_df, exclude_covid_quarters=True)
+    if metrics_df.empty and metrics_ex_covid_df.empty:
+        for col in (*POINT_ERROR_METRIC_COLUMNS, *[f"{c}_ex_covid" for c in POINT_ERROR_METRIC_COLUMNS]):
             if col not in out.columns:
                 out[col] = np.nan
         return out
 
     out["model_name"] = out["model_name"].astype(str)
-    merged = out.merge(metrics_df, on="model_name", how="left", suffixes=("", "_computed"))
+    merged = out.copy()
+    if not metrics_df.empty:
+        merged = merged.merge(metrics_df, on="model_name", how="left", suffixes=("", "_computed"))
+    if not metrics_ex_covid_df.empty:
+        merged = merged.merge(
+            metrics_ex_covid_df.rename(columns={c: f"{c}_ex_covid" for c in POINT_ERROR_METRIC_COLUMNS}),
+            on="model_name",
+            how="left",
+            suffixes=("", "_computed_ex_covid"),
+        )
 
-    for col in ("MAE", "MSE", "RMSE"):
+    for col in (*POINT_ERROR_METRIC_COLUMNS, *[f"{c}_ex_covid" for c in POINT_ERROR_METRIC_COLUMNS]):
         computed_col = f"{col}_computed"
         if computed_col in merged.columns:
             computed_vals = pd.to_numeric(merged[computed_col], errors="coerce")
@@ -958,15 +980,37 @@ def _augment_leaderboard_with_point_error_metrics(
         if computed_col in merged.columns:
             merged = merged.drop(columns=[computed_col])
 
+    rank_cols = [c for c in ["RMSE_ex_covid", "MSE_ex_covid", "MAE_ex_covid"] if c in merged.columns]
+    if rank_cols:
+        primary = rank_cols[0]
+        tie_breakers = [c for c in ["RMSE", "MSE", "MAE"] if c in merged.columns]
+        merged = merged.sort_values(
+            by=[primary, *tie_breakers, "model_name"],
+            ascending=[True] * (2 + len(tie_breakers)),
+            na_position="last",
+        ).reset_index(drop=True)
+
     return merged
 
 
-def _compute_point_error_metrics(records_df: pd.DataFrame) -> pd.DataFrame:
+def _compute_point_error_metrics(
+    records_df: pd.DataFrame,
+    *,
+    exclude_covid_quarters: bool = False,
+) -> pd.DataFrame:
     cols = ["model_name", "y_true", "y_pred"]
+    if exclude_covid_quarters:
+        cols.append("timestamp")
     if records_df.empty or any(col not in records_df.columns for col in cols):
-        return pd.DataFrame(columns=["model_name", "MAE", "MSE", "RMSE"])
+        return pd.DataFrame(columns=["model_name", *POINT_ERROR_METRIC_COLUMNS])
 
     work = records_df[cols].copy()
+    if exclude_covid_quarters:
+        ts = pd.to_datetime(work["timestamp"], errors="coerce")
+        q = pd.PeriodIndex(ts, freq="Q-DEC")
+        keep = ~q.isin(list(COVID_EXCLUDED_QUARTERS))
+        work = work.loc[keep].copy()
+        work = work.drop(columns=["timestamp"], errors="ignore")
     work["model_name"] = work["model_name"].astype(str)
     work["y_true"] = pd.to_numeric(work["y_true"], errors="coerce")
     work["y_pred"] = pd.to_numeric(work["y_pred"], errors="coerce")
@@ -984,7 +1028,7 @@ def _compute_point_error_metrics(records_df: pd.DataFrame) -> pd.DataFrame:
         rmse = float(np.sqrt(mse))
         rows.append({"model_name": str(model_name), "MAE": mae, "MSE": mse, "RMSE": rmse})
 
-    return pd.DataFrame(rows, columns=["model_name", "MAE", "MSE", "RMSE"])
+    return pd.DataFrame(rows, columns=["model_name", *POINT_ERROR_METRIC_COLUMNS])
 
 
 def _resolve_git_commit_hash() -> str:
