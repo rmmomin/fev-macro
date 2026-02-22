@@ -8,10 +8,12 @@ from datasets import Dataset
 
 from .base import (
     BaseModel,
+    apply_default_covid_intervention,
     get_history_by_item,
     get_item_order,
     get_task_horizon,
     get_task_id_column,
+    get_timestamps_by_item,
     to_prediction_dataset,
 )
 from .random_forest import _drift_fallback
@@ -467,19 +469,27 @@ class LSTMUnivariateModel(_BaseLSTMModel):
         horizon = get_task_horizon(task)
         item_order = get_item_order(future_data, task)
         history = get_history_by_item(past_data, task)
+        past_timestamps = get_timestamps_by_item(past_data, task)
+        future_timestamps = get_timestamps_by_item(future_data, task)
 
         preds: dict[Any, np.ndarray] = {}
         for idx, item_id in enumerate(item_order):
             if item_id not in history:
                 raise ValueError(f"No history available for item_id={item_id}")
 
-            y = _sanitize_array(np.asarray(history[item_id], dtype=float))
-            if y.size == 0:
+            raw_y = _sanitize_array(np.asarray(history[item_id], dtype=float))
+            if raw_y.size == 0:
                 raise ValueError(f"No history available for item_id={item_id}")
+            y, future_effect = apply_default_covid_intervention(
+                raw_y,
+                past_timestamps=past_timestamps.get(item_id),
+                future_timestamps=future_timestamps.get(item_id),
+                horizon=horizon,
+            )
 
             X_samples, Y_samples = _build_univariate_samples(y=y, lookback=self.lookback, horizon=horizon)
             if X_samples.shape[0] < self.min_train_samples:
-                preds[item_id] = _fallback_forecast(y, horizon=horizon)
+                preds[item_id] = _fallback_forecast(y, horizon=horizon) + future_effect
                 continue
 
             X_last = y[-self.lookback :].reshape(self.lookback, 1)
@@ -493,7 +503,7 @@ class LSTMUnivariateModel(_BaseLSTMModel):
                 horizon=horizon,
                 y_fallback=y,
                 seed_offset=idx,
-            )
+            ) + future_effect
 
         return to_prediction_dataset(preds, item_order)
 

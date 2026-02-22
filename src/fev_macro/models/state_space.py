@@ -5,7 +5,15 @@ from typing import Any
 import numpy as np
 from datasets import Dataset
 
-from .base import BaseModel, get_history_by_item, get_item_order, get_task_horizon, to_prediction_dataset
+from .base import (
+    BaseModel,
+    apply_default_covid_intervention,
+    get_history_by_item,
+    get_item_order,
+    get_task_horizon,
+    get_timestamps_by_item,
+    to_prediction_dataset,
+)
 from .random_forest import _drift_fallback
 
 
@@ -32,13 +40,21 @@ class LocalTrendStateSpaceModel(BaseModel):
         horizon = get_task_horizon(task)
         item_order = get_item_order(future_data, task)
         history = get_history_by_item(past_data, task)
+        past_timestamps = get_timestamps_by_item(past_data, task)
+        future_timestamps = get_timestamps_by_item(future_data, task)
 
         preds: dict[Any, np.ndarray] = {}
         for item_id in item_order:
             y = np.asarray(history[item_id], dtype=float)
             if y.size == 0:
                 raise ValueError(f"No history available for item_id={item_id}")
-            preds[item_id] = self._forecast_one(y=y, horizon=horizon)
+            adjusted, future_effect = apply_default_covid_intervention(
+                y,
+                past_timestamps=past_timestamps.get(item_id),
+                future_timestamps=future_timestamps.get(item_id),
+                horizon=horizon,
+            )
+            preds[item_id] = self._forecast_one(y=adjusted, horizon=horizon) + future_effect
 
         return to_prediction_dataset(preds, item_order)
 

@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from .data import (
+    COVID_DUMMY_COLUMNS,
     DEFAULT_SOURCE_SERIES_CANDIDATES,
     DEFAULT_TARGET_SERIES_NAME,
     RELEASE_STAGE_TO_ALFRED_QOQ_COLUMN,
@@ -455,7 +456,17 @@ def run_eval_pipeline(
                 frame=gdp_df,
                 target_col="target",
                 max_covariates=int(getattr(args, "max_covariates", 120)),
+                required_columns=COVID_DUMMY_COLUMNS,
             )
+            known_calendar_covariates = [c for c in COVID_DUMMY_COLUMNS if c in covariate_columns]
+            if known_calendar_covariates:
+                print(
+                    "Known calendar covariates enabled: "
+                    f"{', '.join(known_calendar_covariates)}"
+                )
+        else:
+            known_calendar_covariates = [c for c in COVID_DUMMY_COLUMNS if c in covariate_columns]
+        past_covariates_for_task = [c for c in covariate_columns if c not in set(known_calendar_covariates)]
 
         keep_cols = ["item_id", "timestamp", "target", *covariate_columns]
         keep_cols = [c for c in keep_cols if c in gdp_df.columns]
@@ -513,8 +524,8 @@ def run_eval_pipeline(
             id_col="id",
             timestamp_col="timestamp",
             target_col="target",
-            known_dynamic_columns=[],
-            past_dynamic_columns=covariate_columns,
+            known_dynamic_columns=known_calendar_covariates,
+            past_dynamic_columns=past_covariates_for_task,
             horizons=args.horizons,
             num_windows=args.num_windows,
             metric=args.metric,
@@ -571,8 +582,8 @@ def run_eval_pipeline(
                         id_col="id",
                         timestamp_col="timestamp",
                         target_col="target",
-                        known_dynamic_columns=[],
-                        past_dynamic_columns=covariate_columns,
+                        known_dynamic_columns=known_calendar_covariates,
+                        past_dynamic_columns=past_covariates_for_task,
                         horizons=[int(horizon)],
                         num_windows=int(compatible_windows),
                         metric=args.metric,
@@ -1322,18 +1333,35 @@ def _merge_covariates_by_quarter(target_df: pd.DataFrame, covariate_df: pd.DataF
     return merged
 
 
-def _select_covariate_columns(frame: pd.DataFrame, target_col: str, max_covariates: int) -> list[str]:
+def _select_covariate_columns(
+    frame: pd.DataFrame,
+    target_col: str,
+    max_covariates: int,
+    required_columns: Sequence[str] | None = None,
+) -> list[str]:
     exclude = {"item_id", "timestamp", target_col}
+    required: list[str] = []
+    for col in list(required_columns or []):
+        if col in exclude or col not in frame.columns or col in required:
+            continue
+        required.append(str(col))
+
+    if int(max_covariates) <= 0:
+        return []
+    if len(required) >= int(max_covariates):
+        return required[: int(max_covariates)]
+
     candidates: list[str] = []
     for col in frame.columns:
-        if col in exclude:
+        if col in exclude or col in required:
             continue
         s = pd.to_numeric(frame[col], errors="coerce")
         if s.notna().sum() < 8:
             continue
         candidates.append(col)
     ordered = sorted(candidates, key=lambda v: str(v))
-    return ordered[: max(0, int(max_covariates))]
+    slots = max(0, int(max_covariates) - len(required))
+    return [*required, *ordered[:slots]]
 
 
 def _apply_fast_mode_model_list(model_names: Sequence[str]) -> tuple[list[str], list[str]]:

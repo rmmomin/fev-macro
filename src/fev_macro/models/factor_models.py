@@ -8,12 +8,13 @@ import numpy as np
 import pandas as pd
 from datasets import Dataset
 
-from ..data import extract_past_cutoff_timestamp
+from ..data import COVID_DUMMY_COLUMNS, extract_past_cutoff_timestamp
 from .base import BaseModel, get_history_by_item, get_item_order, get_task_horizon, get_task_id_column, to_prediction_dataset
 from .random_forest import _drift_fallback, _rows_by_item, _to_numeric_array
 
 
 PREFERRED_FACTOR_COVARIATES: tuple[str, ...] = (
+    *COVID_DUMMY_COLUMNS,
     "UNRATE",
     "FEDFUNDS",
     "CPIAUCSL",

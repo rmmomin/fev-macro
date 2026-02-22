@@ -15,6 +15,7 @@ from fev_macro.eval_runner import (
     _apply_profile_defaults,
     _resolve_eval_release_metric,
     _resolve_eval_release_stages,
+    _select_covariate_columns,
     build_eval_arg_parser,
     parse_args_with_provenance,
 )
@@ -94,3 +95,24 @@ def test_alfred_qoq_saar_default_stage_is_first() -> None:
         eval_release_stages=None,
     )
     assert stages == ["first"]
+
+
+def test_select_covariates_keeps_required_columns_under_cap() -> None:
+    frame = pd.DataFrame(
+        {
+            "item_id": ["gdp"] * 10,
+            "timestamp": pd.date_range("2018-01-01", periods=10, freq="QS-DEC"),
+            "target": [1.0] * 10,
+            "AAA": range(10),
+            "BBB": range(10),
+            "covid_dummy_2020q2": [0.0] * 10,
+            "covid_dummy_2020q3": [0.0] * 10,
+        }
+    )
+    cols = _select_covariate_columns(
+        frame=frame,
+        target_col="target",
+        max_covariates=2,
+        required_columns=["covid_dummy_2020q2", "covid_dummy_2020q3"],
+    )
+    assert cols == ["covid_dummy_2020q2", "covid_dummy_2020q3"]

@@ -46,6 +46,11 @@ RELEASE_STAGE_TO_ALFRED_QOQ_SAAR_COLUMN: dict[str, str] = {
     "second": "qoq_saar_growth_alfred_second_pct",
     "third": "qoq_saar_growth_alfred_third_pct",
 }
+COVID_DUMMY_PERIOD_BY_COLUMN: dict[str, pd.Period] = {
+    "covid_dummy_2020q2": pd.Period("2020Q2", freq="Q-DEC"),
+    "covid_dummy_2020q3": pd.Period("2020Q3", freq="Q-DEC"),
+}
+COVID_DUMMY_COLUMNS: tuple[str, ...] = tuple(COVID_DUMMY_PERIOD_BY_COLUMN.keys())
 
 
 def _default_qd_panel_candidates(covariate_mode: Literal["unprocessed", "processed"]) -> tuple[Path, ...]:
@@ -71,6 +76,16 @@ def _resolve_panel_candidate(
         if resolved.exists():
             return resolved
     return candidates[0].expanduser().resolve()
+
+
+def _append_covid_dummies(frame: pd.DataFrame, timestamp_col: str = "timestamp") -> pd.DataFrame:
+    """Append fixed pandemic-quarter indicator covariates."""
+    out = frame.copy()
+    ts = pd.to_datetime(out[timestamp_col], errors="coerce")
+    quarter = pd.PeriodIndex(ts, freq="Q-DEC")
+    for col, period in COVID_DUMMY_PERIOD_BY_COLUMN.items():
+        out[col] = (quarter == period).astype(float)
+    return out
 
 
 def discover_historical_qd_vintage_files(historical_qd_dir: str | Path) -> dict[pd.Period, Path]:
@@ -339,6 +354,11 @@ def build_real_gdp_target_series_from_time_rows(
                 transformed_covariates = [c for c in selected_covariates if c in fred_transform_codes]
             out = pd.concat([out, cov_frame.reset_index(drop=True)], axis=1)
             covariate_columns.extend(selected_covariates)
+
+        out = _append_covid_dummies(out, timestamp_col="timestamp")
+        for col in COVID_DUMMY_COLUMNS:
+            if col not in covariate_columns:
+                covariate_columns.append(col)
 
     out = _drop_invalid_and_fill_covariates(
         out=out,
@@ -1276,6 +1296,11 @@ def _build_from_long_format(
             out[cov] = cov_series.to_numpy(dtype=float)
             covariate_columns.append(cov)
 
+        out = _append_covid_dummies(out, timestamp_col="timestamp")
+        for col in COVID_DUMMY_COLUMNS:
+            if col not in covariate_columns:
+                covariate_columns.append(col)
+
     out = _drop_invalid_and_fill_covariates(
         out=out,
         covariate_columns=covariate_columns,
@@ -1352,6 +1377,11 @@ def _build_from_wide_format(
                 covariate_columns.append(cov)
         if covariate_data:
             out = pd.concat([out, pd.DataFrame(covariate_data)], axis=1)
+
+        out = _append_covid_dummies(out, timestamp_col="timestamp")
+        for col in COVID_DUMMY_COLUMNS:
+            if col not in covariate_columns:
+                covariate_columns.append(col)
 
     out = _drop_invalid_and_fill_covariates(
         out=out,

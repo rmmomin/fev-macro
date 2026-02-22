@@ -11,7 +11,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from fev_macro.data import HistoricalQuarterlyVintageProvider
+from fev_macro.data import COVID_DUMMY_COLUMNS, HistoricalQuarterlyVintageProvider
 
 
 def test_historical_provider_falls_back_to_qd_panel(tmp_path: Path) -> None:
@@ -48,3 +48,8 @@ def test_historical_provider_falls_back_to_qd_panel(tmp_path: Path) -> None:
     assert frame.shape[0] == 2
     assert np.isfinite(frame["target"]).all()
     assert "UNRATE" in frame.columns
+    for col in COVID_DUMMY_COLUMNS:
+        assert col in frame.columns
+    assert frame.loc[0, "covid_dummy_2020q2"] == 0.0
+    assert frame.loc[1, "covid_dummy_2020q2"] == 0.0
+    assert frame.loc[:, "covid_dummy_2020q3"].eq(0.0).all()
