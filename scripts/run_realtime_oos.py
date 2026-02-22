@@ -298,15 +298,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=f"Model names. Available: {sorted(set(BUILTIN_MODELS) | set(available_models()))}",
     )
-    parser.add_argument("--horizons", type=int, nargs="+", default=[1, 2, 3, 4])
+    parser.add_argument("--horizons", type=int, nargs="+", default=[1])
     parser.add_argument(
         "--score_releases",
         nargs="+",
         choices=["first", "second", "third"],
         default=None,
         help=(
-            "Truth releases to score against. Defaults to first for quarterly origins and "
-            "first+second+third for monthly origins."
+            "Truth releases to score against. Defaults to first vintage only."
         ),
     )
     parser.add_argument("--target_col", type=str, default="GDPC1")
@@ -400,8 +399,6 @@ def main() -> int:
             requested_models = requested_models[:3]
         if args.max_origins is None:
             args.max_origins = 10
-        if args.origin_schedule == "monthly" and args.horizons == [1, 2, 3, 4]:
-            args.horizons = [1, 2, 3, 4]
 
     output_dir = resolve_oos_output_dir(mode=mode, explicit_dir=args.output_dir or None)
     output_dir.mkdir(parents=True, exist_ok=True)
