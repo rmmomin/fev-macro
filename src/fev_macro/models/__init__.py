@@ -14,6 +14,7 @@ from .bvar_minnesota import (
 from .chronos2 import Chronos2Model
 from .ensemble import EnsembleAvgTop3Model
 from .factor_models import MixedFrequencyDFMModel, QuarterlyFactorPCAModel
+from .lstm_models import LSTMMultivariateModel, LSTMUnivariateModel
 from .random_forest import RandomForestModel
 from .randoms import RandomNormal, RandomPermutation, RandomUniform
 from .state_space import LocalTrendStateSpaceModel
@@ -42,6 +43,8 @@ MODEL_REGISTRY: dict[str, ModelBuilder] = {
     "random_permutation": lambda seed: RandomPermutation(seed=seed),
     "random_forest": lambda seed: RandomForestModel(seed=seed),
     "xgboost": lambda seed: XGBoostModel(seed=seed),
+    "lstm_univariate": lambda seed: LSTMUnivariateModel(seed=seed),
+    "lstm_multivariate": lambda seed: LSTMMultivariateModel(seed=seed),
     "local_trend_ssm": _no_seed(LocalTrendStateSpaceModel),
     "bvar_minnesota_8": _no_seed(BVARMinnesota8Model),
     "bvar_minnesota_20": _no_seed(BVARMinnesota20Model),
