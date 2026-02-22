@@ -31,6 +31,16 @@ def test_eval_parser_does_not_exclude_2020_by_default() -> None:
     assert args.exclude_years == []
 
 
+def test_vintage_fallback_defaults_to_strict_mode() -> None:
+    parser = build_eval_arg_parser(
+        description="test",
+        default_target_transform="log_level",
+        default_results_dir="results/test",
+    )
+    args = parser.parse_args([])
+    assert bool(args.vintage_fallback_to_earliest) is False
+
+
 def test_exclude_years_none_keeps_2020_rows() -> None:
     df = pd.DataFrame(
         {

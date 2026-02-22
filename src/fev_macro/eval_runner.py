@@ -224,11 +224,11 @@ def build_eval_arg_parser(
     parser.add_argument(
         "--vintage_fallback_to_earliest",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help=(
             "Allow windows earlier than the first vintage to fall back to the earliest available vintage "
-            "instead of enforcing strict vintage coverage. Enabled by default; use "
-            "--no-vintage_fallback_to_earliest for strict mode."
+            "instead of enforcing strict vintage coverage. Disabled by default; use "
+            "--vintage_fallback_to_earliest to allow fallback mode."
         ),
     )
     parser.add_argument(
@@ -300,6 +300,11 @@ def run_eval_pipeline(
     mode = _normalize_covariate_mode(covariate_mode)
     args = cli_args
     profile = _apply_profile_defaults(args=args, covariate_mode=mode)
+    provided_dests = set(getattr(args, "_provided_dests", set()) or set())
+    num_windows_is_explicit = "num_windows" in provided_dests
+    requested_num_windows = int(getattr(args, "num_windows", 0) or 0)
+    if requested_num_windows <= 0:
+        raise ValueError("--num_windows must be a positive integer.")
 
     allow_snapshot_eval = bool(getattr(args, "allow_snapshot_eval", False))
     disable_historical_vintages = bool(getattr(args, "disable_historical_vintages", False))
@@ -431,6 +436,7 @@ def run_eval_pipeline(
         print("Fast mode: enabled")
 
     all_tasks = []
+    task_window_limits: list[int] = []
     task_provider_by_name: dict[str, HistoricalQuarterlyVintageProvider] = {}
     task_meta_by_task_name: dict[str, dict[str, Any]] = {}
     window_vintage_log: dict[tuple[str, int], dict[str, Any]] = {}
@@ -518,6 +524,11 @@ def run_eval_pipeline(
         )
 
         task_prefix = args.task_prefix if len(stages) == 1 else f"{args.task_prefix}_{stage}"
+        num_windows_for_task_build = int(requested_num_windows)
+        if not num_windows_is_explicit:
+            # Search the full feasible tail by default; strict vintage checks below will
+            # clamp to the maximum compatible window count.
+            num_windows_for_task_build = max(num_windows_for_task_build, int(len(gdp_task_df)))
         tasks = make_gdp_tasks(
             dataset_path=str(local_dataset_path),
             dataset_config=None,
@@ -527,10 +538,11 @@ def run_eval_pipeline(
             known_dynamic_columns=known_calendar_covariates,
             past_dynamic_columns=past_covariates_for_task,
             horizons=args.horizons,
-            num_windows=args.num_windows,
+            num_windows=int(num_windows_for_task_build),
             metric=args.metric,
             task_prefix=task_prefix,
         )
+        stage_task_window_limits = [int(num_windows_for_task_build)] * len(tasks)
 
         vintage_provider: HistoricalQuarterlyVintageProvider | None = None
         if not bool(getattr(args, "disable_historical_vintages", False)):
@@ -558,6 +570,7 @@ def run_eval_pipeline(
             provider_source_kinds.add(vintage_provider.source_kind)
 
             adjusted_tasks = []
+            adjusted_limits: list[int] = []
             for horizon, task in zip(args.horizons, tasks):
                 compatible_windows = vintage_provider.compatible_window_count(task)
                 if compatible_windows <= 0:
@@ -566,15 +579,18 @@ def run_eval_pipeline(
                         f"{horizon} (eval={stage}). Try reducing --num_windows or disabling historical vintages."
                     )
 
-                if compatible_windows < int(args.num_windows):
-                    reason = (
-                        "strict historical-vintage coverage and valid task windows"
-                        if not args.vintage_fallback_to_earliest
-                        else "valid task windows"
+                if num_windows_is_explicit and compatible_windows < int(requested_num_windows):
+                    raise ValueError(
+                        f"Requested --num_windows={requested_num_windows} exceeds the maximum "
+                        f"vintage-compatible windows={compatible_windows} for eval={stage} horizon h={horizon}. "
+                        "Reduce --num_windows or enable --vintage_fallback_to_earliest."
                     )
+
+                if not num_windows_is_explicit:
+                    selected_windows = int(compatible_windows)
                     print(
-                        f"Reducing eval={stage} horizon h={horizon} windows from "
-                        f"{args.num_windows} to {compatible_windows} to enforce {reason}."
+                        f"Auto-selecting eval={stage} horizon h={horizon} windows={selected_windows} "
+                        "(maximum compatible with vintage constraints)."
                     )
                     adjusted_task = make_gdp_tasks(
                         dataset_path=str(local_dataset_path),
@@ -585,16 +601,20 @@ def run_eval_pipeline(
                         known_dynamic_columns=known_calendar_covariates,
                         past_dynamic_columns=past_covariates_for_task,
                         horizons=[int(horizon)],
-                        num_windows=int(compatible_windows),
+                        num_windows=selected_windows,
                         metric=args.metric,
                         task_prefix=task_prefix,
                     )[0]
                     adjusted_tasks.append(adjusted_task)
+                    adjusted_limits.append(selected_windows)
                 else:
                     adjusted_tasks.append(task)
+                    adjusted_limits.append(int(requested_num_windows))
             tasks = adjusted_tasks
+            stage_task_window_limits = adjusted_limits
 
         all_tasks.extend(tasks)
+        task_window_limits.extend(stage_task_window_limits)
         stage_for_meta = str(eval_meta.get("release_stage", stage))
         task_meta = {
             "release_stage": stage_for_meta,
@@ -622,6 +642,7 @@ def run_eval_pipeline(
 
     if not all_tasks:
         raise ValueError("No tasks were created for evaluation.")
+    runner_num_windows = int(max(task_window_limits)) if task_window_limits else int(requested_num_windows)
 
     past_data_adapter = None
     if task_provider_by_name:
@@ -648,7 +669,7 @@ def run_eval_pipeline(
     summaries, prediction_records = run_models_on_tasks_with_records(
         tasks=all_tasks,
         models=models,
-        num_windows=int(args.num_windows),
+        num_windows=runner_num_windows,
         past_data_adapter=past_data_adapter,
     )
 
