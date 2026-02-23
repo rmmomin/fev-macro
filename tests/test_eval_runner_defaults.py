@@ -80,7 +80,7 @@ def test_standard_profile_defaults_match_contract() -> None:
     _apply_profile_defaults(args_unprocessed, covariate_mode="unprocessed")
     assert args_unprocessed.horizons == [1, 2, 4]
     assert args_unprocessed.num_windows == 60
-    assert "atlantafed_gdpnow" in args_unprocessed.models
+    assert "atlantafed_gdpnow" not in args_unprocessed.models
     assert "chronos2" not in args_unprocessed.models
     assert "ensemble_avg_top3" not in args_unprocessed.models
     assert "ensemble_weighted_top5" not in args_unprocessed.models
@@ -90,7 +90,7 @@ def test_standard_profile_defaults_match_contract() -> None:
     assert args_processed.horizons == [1, 2, 4]
     assert args_processed.num_windows == 40
     assert args_processed.target_transform == "saar_growth"
-    assert "atlantafed_gdpnow" in args_processed.models
+    assert "atlantafed_gdpnow" not in args_processed.models
     assert "chronos2" not in args_processed.models
     assert "ensemble_avg_top3" not in args_processed.models
     assert "ensemble_weighted_top5" not in args_processed.models

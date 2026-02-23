@@ -14,7 +14,11 @@ from .bvar_minnesota import (
 from .chronos2 import Chronos2Model
 from .ensemble import EnsembleAvgTop3Model
 from .factor_models import MixedFrequencyDFMModel, QuarterlyFactorPCAModel
-from .gdpnow import AtlantaFedGDPNowModel
+from .gdpnow import (
+    AtlantaFedGDPNowAsOfWindowCutoffModel,
+    AtlantaFedGDPNowFinalPreReleaseModel,
+    AtlantaFedGDPNowModel,
+)
 from .lstm_models import LSTMMultivariateModel, LSTMUnivariateModel
 from .random_forest import RandomForestModel
 from .randoms import RandomNormal, RandomPermutation, RandomUniform
@@ -56,8 +60,10 @@ MODEL_REGISTRY: dict[str, ModelBuilder] = {
     "bvar_minnesota_growth_20": _no_seed(BVARMinnesotaGrowth20Model),
     "factor_pca_qd": lambda seed: QuarterlyFactorPCAModel(seed=seed),
     "mixed_freq_dfm_md": lambda seed: MixedFrequencyDFMModel(seed=seed),
-    "atlantafed_gdpnow": _no_seed(AtlantaFedGDPNowModel),
-    "gdpnow": _no_seed(AtlantaFedGDPNowModel),
+    "atlantafed_gdpnow": _no_seed(lambda: AtlantaFedGDPNowModel(name="atlantafed_gdpnow")),
+    "atlantafed_gdpnow_final_pre_release": _no_seed(AtlantaFedGDPNowFinalPreReleaseModel),
+    "atlantafed_gdpnow_asof_window_cutoff": _no_seed(AtlantaFedGDPNowAsOfWindowCutoffModel),
+    "gdpnow": _no_seed(lambda: AtlantaFedGDPNowModel(name="gdpnow")),
     "ensemble_avg_top3": _no_seed(EnsembleAvgTop3Model),
     "auto_arima": _no_seed(lambda: AutoARIMAModel(season_length=4)),
     "auto_ets": _no_seed(lambda: AutoETSModel(season_length=4)),

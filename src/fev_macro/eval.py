@@ -184,6 +184,7 @@ def _run_models_on_task_core(
     ts_col = get_task_timestamp_column(task)
     target_col = get_task_target_column(task)
     task_name = str(getattr(task, "task_name", "task"))
+    needs_records_for_missing = any(bool(getattr(model, "allow_missing_predictions", False)) for model in models.values())
 
     window_cache, prep_time_s_total = _prepare_window_cache(
         task=task,
@@ -192,7 +193,7 @@ def _run_models_on_task_core(
         id_col=id_col,
         timestamp_col=ts_col,
         target_col=target_col,
-        with_records=with_records,
+        with_records=(with_records or needs_records_for_missing),
     )
 
     base_models, ensemble_models = _split_models(models=models)
@@ -211,6 +212,7 @@ def _run_models_on_task_core(
         predictions_cache[model_name] = predictions_per_window
         model_outputs[model_name] = _build_model_output(
             task=task,
+            model=model,
             model_name=model_name,
             predictions_per_window=predictions_per_window,
             inference_time_s=inference_time_s,
@@ -252,6 +254,7 @@ def _run_models_on_task_core(
         predictions_cache[model_name] = predictions_per_window
         model_outputs[model_name] = _build_model_output(
             task=task,
+            model=model,
             model_name=model_name,
             predictions_per_window=predictions_per_window,
             inference_time_s=inference_time_s,
@@ -377,6 +380,7 @@ def _predict_model_on_window_cache(
             model_name=model_name,
             task_name=task_name,
             window_idx=window_idx,
+            allow_nan=bool(getattr(model, "allow_missing_predictions", False)),
         )
         predictions_per_window.append(predictions)
 
@@ -469,6 +473,7 @@ def _posthoc_ensemble_predictions(
 
 def _build_model_output(
     task: Any,
+    model: BaseModel,
     model_name: str,
     predictions_per_window: list[Dataset],
     inference_time_s: float,
@@ -479,22 +484,11 @@ def _build_model_output(
     with_records: bool,
     ensemble_mode: str | None,
 ) -> dict[str, Any]:
-    summary = task.evaluation_summary(
-        predictions_per_window=predictions_per_window,
-        model_name=model_name,
-        training_time_s=0.0,
-        inference_time_s=float(inference_time_s),
-    )
-    summary = dict(summary)
-    summary["inference_time_s"] = float(inference_time_s)
-    summary["num_windows"] = int(len(predictions_per_window))
-    summary["prep_time_s"] = float(prep_time_s_total)
-    if ensemble_mode is not None:
-        summary["ensemble_eval_mode"] = str(ensemble_mode)
+    allows_missing = bool(getattr(model, "allow_missing_predictions", False))
 
-    records: list[dict[str, Any]] = []
-    if with_records:
-        records = _build_records_for_model(
+    records_for_eval: list[dict[str, Any]] = []
+    if with_records or allows_missing:
+        records_for_eval = _build_records_for_model(
             predictions_per_window=predictions_per_window,
             model_name=model_name,
             window_cache=window_cache,
@@ -502,7 +496,96 @@ def _build_model_output(
             task_name=task_name,
         )
 
+    if allows_missing:
+        summary = _build_missing_aware_summary(
+            task=task,
+            model_name=model_name,
+            records=records_for_eval,
+            inference_time_s=float(inference_time_s),
+        )
+    else:
+        summary = task.evaluation_summary(
+            predictions_per_window=predictions_per_window,
+            model_name=model_name,
+            training_time_s=0.0,
+            inference_time_s=float(inference_time_s),
+        )
+        summary = dict(summary)
+
+    summary["inference_time_s"] = float(inference_time_s)
+    summary["num_windows"] = int(len(predictions_per_window))
+    summary["prep_time_s"] = float(prep_time_s_total)
+    if ensemble_mode is not None:
+        summary["ensemble_eval_mode"] = str(ensemble_mode)
+
+    records = records_for_eval if with_records else []
     return {"summary": summary, "records": records}
+
+
+def _build_missing_aware_summary(
+    *,
+    task: Any,
+    model_name: str,
+    records: list[dict[str, Any]],
+    inference_time_s: float,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {"model_name": model_name}
+    if hasattr(task, "to_dict"):
+        summary.update(dict(task.to_dict()))
+
+    eval_metric = str(getattr(task, "eval_metric", "RMSE"))
+    metric_name = eval_metric.upper()
+
+    records_df = pd.DataFrame(records)
+    if records_df.empty:
+        test_error = np.nan
+        num_forecasts = 0
+    else:
+        records_df["window_idx"] = pd.to_numeric(records_df.get("window_idx"), errors="coerce")
+        y_true = pd.to_numeric(records_df.get("y_true"), errors="coerce")
+        y_pred = pd.to_numeric(records_df.get("y_pred"), errors="coerce")
+        err = (y_pred - y_true).to_numpy(dtype=float)
+        records_df["error"] = err
+
+        per_window_scores: list[float] = []
+        for _, grp in records_df.groupby("window_idx", dropna=False, sort=False):
+            score = _compute_eval_metric_from_error_array(
+                err=pd.to_numeric(grp["error"], errors="coerce").to_numpy(dtype=float),
+                metric_name=metric_name,
+            )
+            per_window_scores.append(score)
+
+        finite_scores = np.asarray(per_window_scores, dtype=float)
+        finite_scores = finite_scores[np.isfinite(finite_scores)]
+        test_error = float(np.mean(finite_scores)) if finite_scores.size else np.nan
+        num_forecasts = int(np.isfinite(y_pred.to_numpy(dtype=float)).sum())
+
+    summary.update(
+        {
+            "test_error": test_error,
+            eval_metric: test_error,
+            "training_time_s": 0.0,
+            "inference_time_s": float(inference_time_s),
+            "num_forecasts": int(num_forecasts),
+            "trained_on_this_dataset": False,
+        }
+    )
+    return summary
+
+
+def _compute_eval_metric_from_error_array(err: np.ndarray, metric_name: str) -> float:
+    finite = np.asarray(err, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return float("nan")
+
+    metric = str(metric_name).strip().upper()
+    if metric == "MAE":
+        return float(np.mean(np.abs(finite)))
+    if metric == "MSE":
+        return float(np.mean(np.square(finite)))
+    # Default to RMSE for unsupported metrics to keep missing-aware GDPNow scoring stable.
+    return float(np.sqrt(np.mean(np.square(finite))))
 
 
 def _build_records_for_model(
@@ -625,6 +708,7 @@ def _validate_predictions(
     model_name: str,
     task_name: str,
     window_idx: int,
+    allow_nan: bool = False,
 ) -> None:
     if "predictions" not in predictions.column_names:
         raise ValueError(
@@ -647,10 +731,16 @@ def _validate_predictions(
                 f"expected horizon={horizon}, got {arr.size}"
             )
 
-        if np.isnan(arr).any() or not np.isfinite(arr).all():
+        if np.isinf(arr).any():
             raise ValueError(
                 f"Model={model_name} task={task_name} window={window_idx} item={item_idx}: "
-                "predictions contain NaN/inf"
+                "predictions contain inf values"
+            )
+
+        if not allow_nan and np.isnan(arr).any():
+            raise ValueError(
+                f"Model={model_name} task={task_name} window={window_idx} item={item_idx}: "
+                "predictions contain NaN values"
             )
 
 

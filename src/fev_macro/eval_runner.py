@@ -42,7 +42,6 @@ PROFILE_CHOICES: tuple[Profile, ...] = ("smoke", "standard", "full")
 
 FULL_PROFILE_MODELS: list[str] = [
     "naive_last",
-    "atlantafed_gdpnow",
     "mean",
     "ar4",
     "drift",
@@ -70,7 +69,6 @@ SMOKE_PROFILE_MODELS: list[str] = [
 
 UNPROCESSED_STANDARD_MODELS: list[str] = [
     "naive_last",
-    "atlantafed_gdpnow",
     "drift",
     "auto_arima",
     "theta",
@@ -85,7 +83,6 @@ UNPROCESSED_STANDARD_MODELS: list[str] = [
 
 PROCESSED_STANDARD_MODELS: list[str] = [
     "naive_last",
-    "atlantafed_gdpnow",
     "mean",
     "ar4",
     "auto_arima",
@@ -110,7 +107,34 @@ COVID_EXCLUDED_QUARTERS: tuple[pd.Period, ...] = (
     pd.Period("2020Q3", freq="Q-DEC"),
 )
 POINT_ERROR_METRIC_COLUMNS: tuple[str, ...] = ("MAE", "MSE", "RMSE")
-GDPNOW_MODEL_NAMES: frozenset[str] = frozenset({"atlantafed_gdpnow", "gdpnow"})
+GDPNOW_MODEL_NAMES: frozenset[str] = frozenset(
+    {
+        "atlantafed_gdpnow",
+        "gdpnow",
+        "atlantafed_gdpnow_final_pre_release",
+        "atlantafed_gdpnow_asof_window_cutoff",
+    }
+)
+GDPNOW_FINAL_PRE_RELEASE_NAMES: frozenset[str] = frozenset(
+    {
+        "atlantafed_gdpnow",
+        "gdpnow",
+        "atlantafed_gdpnow_final_pre_release",
+    }
+)
+GDPNOW_ASOF_MODEL_NAME = "atlantafed_gdpnow_asof_window_cutoff"
+GDPNOW_DEBUG_COLUMNS: tuple[str, ...] = (
+    "model_name",
+    "task_name",
+    "window_id",
+    "window_cutoff_timestamp",
+    "target_quarter",
+    "selected_forecast_date",
+    "bea_first_release_date",
+    "info_advantage_days",
+    "is_after_window_cutoff",
+    "is_on_or_after_first_release",
+)
 
 
 def build_eval_arg_parser(
@@ -380,13 +404,13 @@ def run_eval_pipeline(
         requested_models = [*requested_models, baseline_model]
         print(f"Added baseline model '{baseline_model}' to model run list.")
 
+    gdpnow_models_requested = [m for m in requested_models if m in GDPNOW_MODEL_NAMES]
     requested_horizons = [int(h) for h in (getattr(args, "horizons", None) or [])]
     if any(h > 1 for h in requested_horizons):
-        disallowed_gdpnow_models = [m for m in requested_models if m in GDPNOW_MODEL_NAMES]
-        if disallowed_gdpnow_models:
+        if gdpnow_models_requested:
             raise ValueError(
                 "GDPNow nowcast models are only supported for horizon h=1. "
-                f"Received horizons={requested_horizons} with models={disallowed_gdpnow_models}. "
+                f"Received horizons={requested_horizons} with models={gdpnow_models_requested}. "
                 "Remove GDPNow models or run with --horizons 1."
             )
 
@@ -725,6 +749,12 @@ def run_eval_pipeline(
         window_vintage_log=window_vintage_log,
         snapshot_eval=snapshot_eval,
     )
+    gdpnow_debug_df = pd.DataFrame()
+    gdpnow_debug_csv = results_dir / "gdpnow_selection_debug.csv"
+    if gdpnow_models_requested:
+        gdpnow_debug_df = _collect_gdpnow_selection_debug(models=models)
+        gdpnow_debug_df.to_csv(gdpnow_debug_csv, index=False)
+
     leaderboard_df = _augment_leaderboard_with_point_error_metrics(
         leaderboard_df=leaderboard_df,
         records_df=records_df,
@@ -788,9 +818,17 @@ def run_eval_pipeline(
     print(f"Wrote pairwise: {results_dir / 'pairwise.csv'}")
     print(f"Wrote prediction records: {predictions_csv}")
     print(f"Wrote window vintages: {window_vintages_csv}")
+    if gdpnow_models_requested:
+        print(f"Wrote GDPNow selection debug: {gdpnow_debug_csv}")
     print(f"Wrote run metadata: {run_metadata_path}")
     print(f"Wrote KPI metrics: {kpi_csv}")
     print(f"Wrote KPI subperiod metrics: {kpi_subperiod_csv}")
+
+    if gdpnow_models_requested:
+        _print_gdpnow_diagnostics_summary(
+            records_df=records_df,
+            debug_df=gdpnow_debug_df,
+        )
 
     if not timing_df.empty:
         slow_models = (
@@ -948,6 +986,106 @@ def _build_window_vintages_table(
     out = pd.DataFrame(rows)
     out = out.sort_values(["task_name", "window_idx"], kind="stable").reset_index(drop=True)
     return out[columns]
+
+
+def _collect_gdpnow_selection_debug(models: dict[str, Any]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for model in models.values():
+        getter = getattr(model, "get_selection_debug_rows", None)
+        if not callable(getter):
+            continue
+        model_rows = getter()
+        if not isinstance(model_rows, list):
+            continue
+        for row in model_rows:
+            if isinstance(row, dict):
+                rows.append(dict(row))
+
+    if not rows:
+        return pd.DataFrame(columns=list(GDPNOW_DEBUG_COLUMNS))
+
+    out = pd.DataFrame(rows).copy()
+    for col in GDPNOW_DEBUG_COLUMNS:
+        if col not in out.columns:
+            out[col] = pd.NA
+
+    out["model_name"] = out["model_name"].astype(str)
+    out["task_name"] = out["task_name"].astype(str)
+    out["target_quarter"] = out["target_quarter"].astype(str)
+
+    out["window_id"] = pd.to_numeric(out["window_id"], errors="coerce").astype("Int64")
+
+    for col in ("window_cutoff_timestamp", "selected_forecast_date", "bea_first_release_date"):
+        out[col] = pd.to_datetime(out[col], errors="coerce")
+
+    computed_advantage = (
+        out["selected_forecast_date"].dt.normalize() - out["window_cutoff_timestamp"].dt.normalize()
+    ).dt.days.astype(float)
+    existing_advantage = pd.to_numeric(out["info_advantage_days"], errors="coerce")
+    out["info_advantage_days"] = existing_advantage.where(existing_advantage.notna(), computed_advantage)
+
+    for col in ("is_after_window_cutoff", "is_on_or_after_first_release"):
+        raw = out[col]
+        out[col] = raw.map(
+            lambda v: str(v).strip().lower() in {"1", "true", "t", "yes"} if pd.notna(v) else False
+        ).astype(bool)
+
+    dedupe_cols = ["model_name", "task_name", "window_id", "window_cutoff_timestamp", "target_quarter"]
+    out = out.sort_values(
+        ["model_name", "task_name", "window_id", "target_quarter"],
+        kind="stable",
+        na_position="last",
+    )
+    out = out.drop_duplicates(subset=dedupe_cols, keep="last").reset_index(drop=True)
+    return out[list(GDPNOW_DEBUG_COLUMNS)]
+
+
+def _print_gdpnow_diagnostics_summary(records_df: pd.DataFrame, debug_df: pd.DataFrame) -> None:
+    print("GDPNow diagnostics:")
+
+    if records_df.empty or "model_name" not in records_df.columns or "y_pred" not in records_df.columns:
+        print("  non_missing_predictions: 0")
+        print("  asof_missing_share: NA (no GDPNow prediction records)")
+        print("  final_pre_release_info_advantage_days: NA")
+        return
+
+    gdp_records = records_df.loc[records_df["model_name"].astype(str).isin(GDPNOW_MODEL_NAMES)].copy()
+    y_pred = pd.to_numeric(gdp_records.get("y_pred"), errors="coerce")
+    non_missing_predictions = int(np.isfinite(y_pred.to_numpy(dtype=float)).sum())
+    print(f"  non_missing_predictions: {non_missing_predictions}")
+
+    asof_records = gdp_records.loc[gdp_records["model_name"].astype(str) == GDPNOW_ASOF_MODEL_NAME].copy()
+    if asof_records.empty:
+        print("  asof_missing_share: NA (as-of model not run)")
+    else:
+        asof_pred = pd.to_numeric(asof_records["y_pred"], errors="coerce").to_numpy(dtype=float)
+        missing = int((~np.isfinite(asof_pred)).sum())
+        total = int(asof_pred.size)
+        share = float(missing / total) if total > 0 else float("nan")
+        if np.isfinite(share):
+            print(f"  asof_missing_share: {share:.2%} ({missing}/{total})")
+        else:
+            print("  asof_missing_share: NA")
+
+    if debug_df.empty or "model_name" not in debug_df.columns:
+        print("  final_pre_release_info_advantage_days: NA")
+        return
+
+    final_days = pd.to_numeric(
+        debug_df.loc[
+            debug_df["model_name"].astype(str).isin(GDPNOW_FINAL_PRE_RELEASE_NAMES),
+            "info_advantage_days",
+        ],
+        errors="coerce",
+    )
+    final_days = final_days[np.isfinite(final_days.to_numpy(dtype=float))]
+    if final_days.empty:
+        print("  final_pre_release_info_advantage_days: NA")
+    else:
+        print(
+            "  final_pre_release_info_advantage_days: "
+            f"mean={float(final_days.mean()):.2f}, median={float(final_days.median()):.2f}"
+        )
 
 
 def _augment_leaderboard_with_point_error_metrics(
@@ -1498,13 +1636,13 @@ def _apply_profile_defaults(args: argparse.Namespace, covariate_mode: CovariateM
         setattr(args, dest, value)
 
     if profile == "smoke":
-        _set_if_not_provided("horizons", [1])
+        _set_if_not_provided("horizons", [1, 4])
         _set_if_not_provided("num_windows", 10)
         _set_if_not_provided("metric", "RMSE")
         _set_if_not_provided("models", list(SMOKE_PROFILE_MODELS))
 
     elif profile == "standard":
-        _set_if_not_provided("horizons", [1])
+        _set_if_not_provided("horizons", [1, 2, 4])
         _set_if_not_provided("metric", "RMSE")
         if covariate_mode == "unprocessed":
             _set_if_not_provided("target_transform", "log_level")

@@ -17,7 +17,14 @@ DEFAULT_MIN_FIRST_RELEASE_LAG_DAYS = 60
 DEFAULT_MAX_FIRST_RELEASE_LAG_DAYS = 200
 DEFAULT_TARGET_COL = "GDPC1"
 DEFAULT_HORIZONS = (1,)
-GDPNOW_MODEL_NAMES: frozenset[str] = frozenset({"atlantafed_gdpnow", "gdpnow"})
+GDPNOW_MODEL_NAMES: frozenset[str] = frozenset(
+    {
+        "atlantafed_gdpnow",
+        "gdpnow",
+        "atlantafed_gdpnow_final_pre_release",
+        "atlantafed_gdpnow_asof_window_cutoff",
+    }
+)
 DEFAULT_MD_PANEL_PATH = Path("data/panels/fred_md_vintage_panel.parquet")
 RELEASE_STAGE_TO_COL = {
     "first": "first_release",
