@@ -296,8 +296,8 @@ def _fallback_leaderboard(
         if not baseline_series.empty:
             common = pivot[[model_name, baseline_model]].dropna()
             if not common.empty:
-                model_vals = common[model_name].to_numpy(dtype=float)
-                baseline_vals = common[baseline_model].to_numpy(dtype=float)
+                model_vals = common.iloc[:, 0].to_numpy(dtype=float)
+                baseline_vals = common.iloc[:, -1].to_numpy(dtype=float)
                 denom = baseline_vals.mean()
                 skill = float(1.0 - (model_vals.mean() / denom)) if denom != 0 else np.nan
                 skill_lo, skill_hi = _bootstrap_skill_ci(
@@ -459,8 +459,8 @@ def _bootstrap_skill_ci(
     rng: np.random.Generator,
     bootstrap_samples: int,
 ) -> tuple[float, float]:
-    model_values = np.asarray(model_values, dtype=float)
-    baseline_values = np.asarray(baseline_values, dtype=float)
+    model_values = np.asarray(model_values, dtype=float).reshape(-1)
+    baseline_values = np.asarray(baseline_values, dtype=float).reshape(-1)
 
     if model_values.size == 0 or baseline_values.size == 0:
         return np.nan, np.nan

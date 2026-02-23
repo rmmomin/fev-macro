@@ -43,12 +43,6 @@ Full model catalog: [`docs/models.md`](docs/models.md)
 ## Real-time evaluation policy
 **By default, every rolling window trains on an as-of vintage (vintage-correct). Snapshot evaluation is blocked unless you explicitly pass `--allow_snapshot_eval`.** For processed `run_eval`, release truth defaults to BEA-verified ALFRED q/q SAAR first-vintage growth from `data/panels/gdpc1_releases_first_second_third.csv` (`qoq_saar_growth_alfred_first_pct`) via `--eval_release_metric alfred_qoq_saar --eval_release_stages first --target_transform saar_growth`. ALFRED q/q non-SAAR truth remains available via `--eval_release_metric alfred_qoq --target_transform qoq_growth`, and realtime SAAR truth remains available via `--eval_release_metric realtime_qoq_saar --target_transform saar_growth`.
 
-GDPNow is now split into two explicit benchmark modes:
-- `atlantafed_gdpnow_final_pre_release`: intentionally advantaged late-quarter benchmark that uses the latest GDPNow update strictly before BEA first release (`forecast_date < first_release_date`).
-- `atlantafed_gdpnow_asof_window_cutoff`: apples-to-apples variant that only uses GDPNow updates available by each rolling window cutoff (`forecast_date <= window_cutoff_timestamp`), returning missing predictions when no update exists yet.
-
-Default standard/full model lists do not include GDPNow anymore. Run GDPNow only when explicitly requested via `--models ...`. When any GDPNow model is run, evaluation writes `results/.../gdpnow_selection_debug.csv` with selected forecast dates, cutoff alignment, and information-advantage flags.
-
 ## Latest-vintage one-shot forecast + 2025Q4 comparison
 ```bash
 make fetch-latest && make process-latest && make latest-forecast-processed

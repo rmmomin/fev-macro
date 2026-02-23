@@ -13,7 +13,6 @@
   "historical_qd_dir": "/Users/rayhanmomin/code/fev-macro/data/historical/qd/vintages_2018_2026",
   "models": [
     "ar4",
-    "atlantafed_gdpnow",
     "auto_arima",
     "auto_ets",
     "bvar_minnesota_20",

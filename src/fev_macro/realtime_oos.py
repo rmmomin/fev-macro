@@ -17,14 +17,6 @@ DEFAULT_MIN_FIRST_RELEASE_LAG_DAYS = 60
 DEFAULT_MAX_FIRST_RELEASE_LAG_DAYS = 200
 DEFAULT_TARGET_COL = "GDPC1"
 DEFAULT_HORIZONS = (1,)
-GDPNOW_MODEL_NAMES: frozenset[str] = frozenset(
-    {
-        "atlantafed_gdpnow",
-        "gdpnow",
-        "atlantafed_gdpnow_final_pre_release",
-        "atlantafed_gdpnow_asof_window_cutoff",
-    }
-)
 DEFAULT_MD_PANEL_PATH = Path("data/panels/fred_md_vintage_panel.parquet")
 RELEASE_STAGE_TO_COL = {
     "first": "first_release",
@@ -1982,18 +1974,6 @@ def run_backtest(
     stage_list = _normalize_release_stages(release_stages=release_stages, origin_schedule=origin_schedule)
     min_target_period = pd.Period(min_target_quarter, freq="Q-DEC") if min_target_quarter is not None else None
     model_list = resolve_models(models)
-    if any(h > 1 for h in horizon_list):
-        disallowed_gdpnow_models = [
-            str(getattr(model, "name", "")).strip().lower()
-            for model in model_list
-            if str(getattr(model, "name", "")).strip().lower() in GDPNOW_MODEL_NAMES
-        ]
-        if disallowed_gdpnow_models:
-            raise ValueError(
-                "GDPNow nowcast models are only supported for horizon h=1. "
-                f"Received horizons={horizon_list} with models={sorted(set(disallowed_gdpnow_models))}. "
-                "Remove GDPNow models or run with --horizons 1."
-            )
     apply_model_runtime_options(
         model_list=model_list,
         md_panel_path=md_panel_path,

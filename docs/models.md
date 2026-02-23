@@ -10,14 +10,8 @@ This file documents the model registry used by evaluation (`scripts/run_eval_unp
 - Multivariate macro: `bvar_minnesota_*`, `factor_pca_qd`, `mixed_freq_dfm_md`
 - Foundation model adapter: `chronos2`
 - Ensembling: `ensemble_avg_top3`, `ensemble_weighted_top5`
-- GDPNow benchmarks:
-  - `atlantafed_gdpnow_final_pre_release` (intentionally advantaged, latest update strictly before BEA first release)
-  - `atlantafed_gdpnow_asof_window_cutoff` (fair as-of-window variant, may emit missing predictions early in quarter)
-  - legacy aliases `atlantafed_gdpnow` / `gdpnow` map to final-pre-release behavior
 
 Processed-standard profiles include: `ar4`.
-
-GDPNow models are opt-in and are not included in default standard/full model lists. Include them explicitly with `--models ...` when needed.
 
 ## New/important variants
 | Model | Description | Fallback behavior |

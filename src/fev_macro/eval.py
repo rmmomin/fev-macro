@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 import json
 import time
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Callable
 
@@ -567,7 +568,9 @@ def _build_missing_aware_summary(
             "training_time_s": 0.0,
             "inference_time_s": float(inference_time_s),
             "num_forecasts": int(num_forecasts),
+            "dataset_fingerprint": str(getattr(task, "_dataset_fingerprint", "")),
             "trained_on_this_dataset": False,
+            "fev_version": _resolve_fev_version(),
         }
     )
     return summary
@@ -584,8 +587,15 @@ def _compute_eval_metric_from_error_array(err: np.ndarray, metric_name: str) -> 
         return float(np.mean(np.abs(finite)))
     if metric == "MSE":
         return float(np.mean(np.square(finite)))
-    # Default to RMSE for unsupported metrics to keep missing-aware GDPNow scoring stable.
+    # Default to RMSE for unsupported metrics.
     return float(np.sqrt(np.mean(np.square(finite))))
+
+
+def _resolve_fev_version() -> str:
+    try:
+        return str(version("fev"))
+    except Exception:
+        return "0.0.0"
 
 
 def _build_records_for_model(
