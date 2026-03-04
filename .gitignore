@@ -10,6 +10,7 @@ results/**
 data/panels/**/*.parquet
 data/latest/**
 data/processed/**
+data/realtime/**
 data/historical/**
 data/documentation/**
 triage/
