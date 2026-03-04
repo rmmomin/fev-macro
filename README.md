@@ -30,9 +30,9 @@ make eval-processed-standard
 Details: [`docs/data_processing.md`](docs/data_processing.md)
 
 ## Models included
-Core baselines and multivariate models include `naive_last`, `mean`, `drift`, `ar4`, `auto_arima`, `auto_ets`, `theta`, `local_trend_ssm`, `random_forest`, `xgboost`, `factor_pca_qd`, `mixed_freq_dfm_md`, `bvar_minnesota_8`, `bvar_minnesota_20`, `bvar_minnesota_growth_8`, `bvar_minnesota_growth_20`, `chronos2`, and opt-in LSTM variants `lstm_univariate` / `lstm_multivariate` (plus optional ensemble variants).
+Core baselines and multivariate models include `naive_last`, `mean`, `drift`, `ar4`, `auto_arima`, `auto_ets`, `theta`, `local_trend_ssm`, `random_forest`, `xgboost`, `factor_pca_qd`, `mixed_freq_dfm_md`, `bvar_minnesota_8`, `bvar_minnesota_20`, `bvar_minnesota_growth_8`, `bvar_minnesota_growth_20`, `chronos2`, and LSTM variants `lstm_univariate` / `lstm_multivariate` (plus optional ensemble variants).
 
-LSTM variants require PyTorch (`torch>=2.2.0`) and are intentionally opt-in (not part of default model sets).
+LSTM variants require PyTorch (`torch>=2.2.0`). They are included in `--profile full`, and remain opt-in for other model/profile selections.
 
 ```bash
 python scripts/run_eval_processed.py --models lstm_univariate lstm_multivariate --num_windows 20
@@ -48,6 +48,20 @@ Full model catalog: [`docs/models.md`](docs/models.md)
 make fetch-latest && make process-latest && make latest-forecast-processed
 make plot-2025q4
 ```
+
+## Optional BoE evaluation workflow
+Use BoE-style schema exports, DM tests, rolling/fluctuation diagnostics, and plots:
+
+```bash
+pip install -r requirements-boe.txt
+
+python -m fev_macro.boe export --predictions_csv results/realtime_oos/predictions.csv --release_table_csv data/panels/gdpc1_releases_first_second_third.csv --out_dir results/boe_export --truth first --variable GDPC1 --metric levels --forecast_value_col y_hat_level
+python -m fev_macro.boe eval --forecasts_csv results/boe_export/boe_forecasts.csv --outturns_csv results/boe_export/boe_outturns.csv --k 0 --benchmark_model naive_last --out_dir results/boe_results
+python -m fev_macro.boe plots --forecasts_csv results/boe_export/boe_forecasts.csv --outturns_csv results/boe_export/boe_outturns.csv --variable GDPC1 --source naive_last --metric levels --frequency Q --k 0 --horizon 0 --ma_window 4 --out_dir results/boe_plots
+```
+
+`k=0` corresponds to first-release truth under the default export conventions.
+More details: [`docs/boe_evaluation.md`](docs/boe_evaluation.md)
 
 ## Outputs + repo layout
 - `data/historical/`: downloaded FRED vintage archives and extracted CSVs

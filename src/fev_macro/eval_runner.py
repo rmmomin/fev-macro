@@ -51,6 +51,8 @@ FULL_PROFILE_MODELS: list[str] = [
     "random_permutation",
     "random_forest",
     "xgboost",
+    "lstm_univariate",
+    "lstm_multivariate",
     "local_trend_ssm",
     "bvar_minnesota_8",
     "bvar_minnesota_20",
@@ -280,6 +282,85 @@ def build_eval_arg_parser(
             "Validate that y_true matches the selected release-table truth column for first/second/third growth stages. "
             "Defaults to enabled for processed runs and disabled otherwise."
         ),
+    )
+    parser.add_argument(
+        "--boe_outputs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Export predictions to BoE schema and run BoE accuracy/DM tables into "
+            "<results_dir>/boe. Enabled by default."
+        ),
+    )
+    parser.add_argument(
+        "--boe_strict",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "If enabled, fail the whole run when BoE export/eval fails. "
+            "Default is best-effort warning-only mode."
+        ),
+    )
+    parser.add_argument(
+        "--boe_truth",
+        type=str,
+        choices=["first", "second", "third"],
+        default="first",
+        help="Release stage used for BoE outturn vintage mapping.",
+    )
+    parser.add_argument(
+        "--boe_variable",
+        type=str,
+        default="GDPC1",
+        help="Variable label written into BoE schema.",
+    )
+    parser.add_argument(
+        "--boe_metric",
+        type=str,
+        default="auto",
+        help=(
+            "Metric label written into BoE schema. "
+            "Use 'auto' to map from target transform; qoq-saar KPI runs map to 'pop'."
+        ),
+    )
+    parser.add_argument(
+        "--boe_forecast_value_col",
+        type=str,
+        default="y_pred",
+        help=(
+            "Prediction column used for BoE export. "
+            "Defaults to y_pred for predictions_per_window output."
+        ),
+    )
+    parser.add_argument(
+        "--boe_k",
+        type=int,
+        default=0,
+        help="BoE outturn maturity k used in BoE evaluation tables.",
+    )
+    parser.add_argument(
+        "--boe_benchmark_model",
+        type=str,
+        default="",
+        help="Benchmark model for BoE DM tables. Defaults to --baseline_model when empty.",
+    )
+    parser.add_argument(
+        "--boe_same_date_range",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use BoE same_date_range mode for fair sample overlap across models.",
+    )
+    parser.add_argument(
+        "--boe_add_random_walk",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Add BoE random-walk benchmark forecasts before BoE evaluation.",
+    )
+    parser.add_argument(
+        "--boe_add_ar_p",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Add BoE AR(p) benchmark forecasts before BoE evaluation.",
     )
     return parser
 
@@ -778,6 +859,29 @@ def run_eval_pipeline(
     print(f"Wrote KPI metrics: {kpi_csv}")
     print(f"Wrote KPI subperiod metrics: {kpi_subperiod_csv}")
 
+    if bool(getattr(args, "boe_outputs", True)):
+        boe_metric = _resolve_boe_metric(
+            requested_metric=str(getattr(args, "boe_metric", "auto") or "auto"),
+            target_transform=target_transform,
+        )
+        boe_benchmark_model = str(getattr(args, "boe_benchmark_model", "") or "").strip() or baseline_model
+        _write_boe_outputs(
+            predictions_csv=predictions_csv,
+            release_csv=Path(str(args.eval_release_csv)).expanduser().resolve(),
+            results_dir=results_dir,
+            truth=str(getattr(args, "boe_truth", "first") or "first"),
+            variable=str(getattr(args, "boe_variable", "GDPC1") or "GDPC1"),
+            metric=boe_metric,
+            target_transform=target_transform,
+            forecast_value_col=str(getattr(args, "boe_forecast_value_col", "y_pred") or "y_pred"),
+            k=int(getattr(args, "boe_k", 0) or 0),
+            benchmark_model=boe_benchmark_model,
+            same_date_range=bool(getattr(args, "boe_same_date_range", False)),
+            add_random_walk=bool(getattr(args, "boe_add_random_walk", False)),
+            add_ar_p=bool(getattr(args, "boe_add_ar_p", False)),
+            strict=bool(getattr(args, "boe_strict", False)),
+        )
+
     if not timing_df.empty:
         slow_models = (
             timing_df.groupby("model_name", as_index=False, dropna=False)
@@ -804,6 +908,109 @@ def run_eval_pipeline(
     if not pairwise_df.empty:
         print("Top pairwise rows:")
         print(pairwise_df.head(10).to_string(index=False))
+
+
+def _write_boe_outputs(
+    *,
+    predictions_csv: Path,
+    release_csv: Path,
+    results_dir: Path,
+    truth: str,
+    variable: str,
+    metric: str,
+    target_transform: str,
+    forecast_value_col: str,
+    k: int,
+    benchmark_model: str,
+    same_date_range: bool,
+    add_random_walk: bool,
+    add_ar_p: bool,
+    strict: bool,
+) -> None:
+    boe_root = results_dir / "boe"
+    boe_export_dir = boe_root / "export"
+    boe_eval_dir = boe_root / "eval"
+
+    try:
+        from .boe_adapter import export_to_boe_schema
+
+        forecasts_csv, outturns_csv = export_to_boe_schema(
+            predictions_csv=predictions_csv,
+            release_table_csv=release_csv if release_csv.exists() else None,
+            out_dir=boe_export_dir,
+            truth=str(truth),
+            variable=str(variable),
+            metric=str(metric),
+            forecast_value_col=str(forecast_value_col),
+        )
+    except Exception as exc:
+        msg = f"BoE export failed: {exc}"
+        if strict:
+            raise RuntimeError(msg) from exc
+        print(f"WARNING: {msg}")
+        return
+
+    print(f"Wrote BoE forecasts: {forecasts_csv}")
+    print(f"Wrote BoE outturns: {outturns_csv}")
+    if target_transform in {"saar_growth", "qoq_growth"} and metric == "pop":
+        print("BoE metric set to 'pop' for q/q SAAR KPI-compatible runs.")
+
+    try:
+        from .boe_eval import run_boe_eval
+
+        run_boe_eval(
+            forecasts_csv=forecasts_csv,
+            outturns_csv=outturns_csv,
+            out_dir=boe_eval_dir,
+            k=int(k),
+            benchmark_model=str(benchmark_model),
+            variable=str(variable),
+            same_date_range=bool(same_date_range),
+            add_boe_random_walk=bool(add_random_walk),
+            add_boe_ar_p=bool(add_ar_p),
+        )
+    except ImportError as exc:
+        msg = (
+            "BoE evaluation skipped because optional dependency 'forecast_evaluation' "
+            "is unavailable. Install with: pip install -r requirements-boe.txt"
+        )
+        if strict:
+            raise RuntimeError(msg) from exc
+        print(f"WARNING: {msg}")
+        return
+    except Exception as exc:
+        msg = f"BoE evaluation failed: {exc}"
+        if strict:
+            raise RuntimeError(msg) from exc
+        print(f"WARNING: {msg}")
+        return
+
+    print(f"Wrote BoE accuracy: {boe_eval_dir / 'accuracy.csv'}")
+    print(f"Wrote BoE DM table: {boe_eval_dir / 'diebold_mariano.csv'}")
+    print(f"Wrote BoE rolling DM: {boe_eval_dir / 'rolling_dm.csv'}")
+    print(f"Wrote BoE fluctuation DM: {boe_eval_dir / 'fluctuation_dm.csv'}")
+    _print_boe_summary(eval_dir=boe_eval_dir)
+
+
+def _print_boe_summary(*, eval_dir: Path) -> None:
+    acc_path = eval_dir / "accuracy.csv"
+    if not acc_path.exists():
+        return
+    try:
+        acc_df = pd.read_csv(acc_path)
+    except Exception:
+        return
+    if acc_df.empty:
+        return
+    rmse_col = "rmse" if "rmse" in acc_df.columns else ("RMSE" if "RMSE" in acc_df.columns else "")
+    if not rmse_col:
+        return
+    cols = [c for c in ["unique_id", "variable", "metric", "forecast_horizon", rmse_col, "n_observations"] if c in acc_df.columns]
+    if not cols:
+        return
+    top = acc_df.sort_values(rmse_col).head(5)
+    print("Top BoE accuracy rows:")
+    print(top[cols].to_string(index=False))
 
 
 def _enrich_summaries_with_task_meta(
@@ -1341,6 +1548,21 @@ def _resolve_eval_release_metric(requested_metric: str, target_transform: str) -
     if metric_norm not in {"alfred_qoq", "alfred_qoq_saar", "realtime_qoq_saar", "level"}:
         raise ValueError(f"Unsupported eval_release_metric={requested_metric!r}")
     return metric_norm
+
+
+def _resolve_boe_metric(requested_metric: str, target_transform: str) -> str:
+    metric_norm = str(requested_metric).strip().lower()
+    if metric_norm in {"levels", "pop", "yoy"}:
+        return metric_norm
+    if metric_norm == "auto":
+        # Growth KPI targets map to BoE period-over-period labels.
+        if target_transform in {"saar_growth", "qoq_growth"}:
+            return "pop"
+        # Level/log-level KPI targets map to BoE levels labels.
+        if target_transform in {"log_level", "level"}:
+            return "levels"
+    # forecast_evaluation currently validates metric against levels/pop/yoy.
+    return "levels"
 
 
 def _resolve_eval_release_stages(

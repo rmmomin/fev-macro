@@ -1,0 +1,3 @@
+forecast_evaluation
+matplotlib>=3.8.0
+shiny
