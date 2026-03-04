@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -15,6 +16,13 @@ from pathlib import Path
 
 import pandas as pd
 
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from fev_macro.fred_aliases import candidate_series_ids  # noqa: E402
+
 FRED_OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"
 DEFAULT_MD_TEMPLATE = "data/historical/md/vintages_1999_2026/2026-01.csv"
 DEFAULT_QD_TEMPLATE = "data/historical/qd/vintages_2018_2026/FRED-QD_2026m1.csv"
@@ -23,13 +31,6 @@ USER_AGENT = "fev-macro-fred-fetch/1.0"
 FRED_PAGE_LIMIT_MAX = 100_000
 FRED_EARLIEST_DATE = "1776-07-04"
 FRED_FAR_FUTURE_DATE = "9999-12-31"
-
-MANUAL_SERIES_ALIASES: dict[str, tuple[str, ...]] = {
-    "CLAIMSx": ("ICSA",),
-    "S&P 500": ("SP500",),
-    "S&P div yield": ("SPDIVY",),
-    "S&P PE ratio": ("SP500PE", "SPEARN"),
-}
 
 
 @dataclass
@@ -109,7 +110,7 @@ def _load_dotenv(path: Path) -> dict[str, str]:
         return env
 
     for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
+        line = raw_line.strip().lstrip("\ufeff")
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
@@ -177,34 +178,7 @@ def read_template_schema(path: str | Path) -> TemplateSchema:
 
 
 def _candidate_series_ids(variable_name: str) -> list[str]:
-    candidates: list[str] = []
-
-    manual = MANUAL_SERIES_ALIASES.get(variable_name)
-    if manual:
-        candidates.extend(list(manual))
-
-    candidates.append(variable_name)
-
-    if variable_name.endswith("x") and len(variable_name) > 1:
-        candidates.append(variable_name[:-1])
-
-    if " " in variable_name:
-        candidates.append(variable_name.replace(" ", ""))
-
-    if variable_name.endswith("x") and " " in variable_name:
-        candidates.append(variable_name[:-1].replace(" ", ""))
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for cand in candidates:
-        c = str(cand).strip()
-        if not c:
-            continue
-        if c in seen:
-            continue
-        seen.add(c)
-        deduped.append(c)
-    return deduped
+    return candidate_series_ids(variable_name)
 
 
 def _parse_dates(values: pd.Series) -> pd.Series:

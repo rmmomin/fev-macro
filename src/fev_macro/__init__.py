@@ -6,6 +6,8 @@ __all__ = [
     "eval",
     "report",
     "realtime_oos",
+    "asof_store",
+    "asof_provider",
     "boe",
     "boe_adapter",
     "boe_eval",

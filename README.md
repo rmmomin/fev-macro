@@ -43,6 +43,50 @@ Full model catalog: [`docs/models.md`](docs/models.md)
 ## Real-time evaluation policy
 **By default, every rolling window trains on an as-of vintage (vintage-correct). Snapshot evaluation is blocked unless you explicitly pass `--allow_snapshot_eval`.** For processed `run_eval`, release truth defaults to BEA-verified ALFRED q/q SAAR first-vintage growth from `data/panels/gdpc1_releases_first_second_third.csv` (`qoq_saar_growth_alfred_first_pct`) via `--eval_release_metric alfred_qoq_saar --eval_release_stages first --target_transform saar_growth`. ALFRED q/q non-SAAR truth remains available via `--eval_release_metric alfred_qoq --target_transform qoq_growth`, and realtime SAAR truth remains available via `--eval_release_metric realtime_qoq_saar --target_transform saar_growth`.
 
+## As-of database (ragged-edge realtime)
+`fev-macro` now supports a bitemporal as-of store (`DuckDB`) for heterogeneous data arrivals/revisions.
+
+1. Set API key:
+```bash
+export FRED_API_KEY="..."
+```
+
+2. First backfill + update:
+```bash
+python scripts/sync_alfred_asof_store.py \
+  --db data/realtime/asof.duckdb \
+  --universe both \
+  --backfill_missing \
+  --observation_start 1959-01-01
+```
+
+3. Incremental refresh (daily/hourly):
+```bash
+python scripts/sync_alfred_asof_store.py \
+  --db data/realtime/asof.duckdb \
+  --universe both \
+  --no-backfill_missing \
+  --lookback_days 7
+```
+
+4. Query an as-of snapshot:
+```bash
+python scripts/example_query_asof.py \
+  --db data/realtime/asof.duckdb \
+  --asof 2019-05-01 \
+  --series GDPC1,CPIAUCSL,UNRATE \
+  --obs_start 1990-01-01 \
+  --out data/realtime/snapshot_2019-05-01.csv
+```
+
+5. Use as-of snapshots inside realtime OOS:
+```bash
+python scripts/run_realtime_oos.py \
+  --mode processed \
+  --asof_db data/realtime/asof.duckdb \
+  --asof_universe both
+```
+
 ## Latest-vintage one-shot forecast + 2025Q4 comparison
 ```bash
 make fetch-latest && make process-latest && make latest-forecast-processed

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from pandas.tseries.offsets import BMonthEnd
 
+from .asof_provider import AsofVintageProvider
 from .models import MODEL_REGISTRY, build_models
 from .models.base import BaseModel
 from .realtime_feeds import RealtimeTaskShim, select_covariate_columns, train_df_to_datasets
@@ -1963,6 +1964,7 @@ def run_backtest(
     md_panel_path: str | Path | None = None,
     qd_panel_path: str | Path | None = None,
     mixed_freq_excluded_years: Sequence[int] | None = None,
+    asof_provider: AsofVintageProvider | None = None,
 ) -> pd.DataFrame:
     if origin_schedule not in {"quarterly", "monthly"}:
         raise ValueError("origin_schedule must be one of {'quarterly', 'monthly'}")
@@ -2058,6 +2060,14 @@ def run_backtest(
             continue
 
         train_df = ds["train_df"].copy()
+        asof_meta: dict[str, Any] = {}
+        if asof_provider is not None:
+            train_df, asof_meta = asof_provider.adapt_train_df(
+                train_df=train_df,
+                asof_ts=origin_date,
+                cutoff_quarter=covariate_cutoff,
+                target_col=target_col,
+            )
         if ragged_edge_covariates:
             future_target_mask = pd.PeriodIndex(train_df["quarter"], freq="Q-DEC") > observed_quarter
             if future_target_mask.any():
@@ -2138,6 +2148,8 @@ def run_backtest(
                             "training_min_quarter": str(training_min_quarter),
                             "training_max_quarter": str(training_max_quarter),
                             "covariate_cutoff_quarter": str(covariate_cutoff),
+                            "asof_db_used": bool(asof_provider is not None),
+                            "asof_snapshot_used": bool(asof_meta.get("used_snapshot", False)),
                             "target_quarter": str(target_quarter),
                             "horizon": int(h),
                             "release_stage": stage,

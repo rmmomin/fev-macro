@@ -8,6 +8,7 @@ scikit-learn>=1.4.0
 matplotlib>=3.8.0
 statsmodels>=0.14.2
 xgboost>=2.1.0
+duckdb>=1.0.0
 
 # Chronos-2 support:
 torch>=2.2.0

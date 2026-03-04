@@ -22,6 +22,7 @@ from fev_macro.realtime_oos import (  # noqa: E402
     load_vintage_panel,
     run_backtest,
 )
+from fev_macro.asof_provider import AsofVintageProvider  # noqa: E402
 from fev_macro.models import available_models  # noqa: E402
 from fev_macro.realtime_runner import (  # noqa: E402
     normalize_mode,
@@ -383,6 +384,31 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Append post-hoc ensemble rows for leaderboard top-3 and top-5 members.",
     )
+    parser.add_argument(
+        "--asof_db",
+        type=str,
+        default="",
+        help=(
+            "Optional path to an as-of DuckDB store. When set, covariates/target history "
+            "are refreshed per-origin from as-of snapshots instead of using only panel values."
+        ),
+    )
+    parser.add_argument(
+        "--asof_universe",
+        type=str,
+        choices=["qd", "md", "both"],
+        default="both",
+        help="Alias universe lookup order used when --asof_db is provided.",
+    )
+    parser.add_argument(
+        "--asof_historical_qd_dir",
+        type=str,
+        default="data/historical/qd",
+        help=(
+            "Historical QD vintages directory used to load transform-code metadata "
+            "for processed as-of covariates."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -406,6 +432,14 @@ def main() -> int:
     release_path = Path(args.release_csv).resolve() if args.release_csv else None
     panel_path = resolve_qd_panel_path(mode=mode, explicit_path=args.vintage_panel or None)
     md_panel_path = resolve_md_panel_path(mode=mode, explicit_path=args.md_vintage_panel or None)
+    asof_provider: AsofVintageProvider | None = None
+    if str(args.asof_db).strip():
+        asof_provider = AsofVintageProvider(
+            db_path=Path(args.asof_db).expanduser().resolve(),
+            covariate_mode=mode,
+            universe=args.asof_universe,
+            historical_qd_dir=args.asof_historical_qd_dir,
+        )
 
     if args.select_models_from_leaderboard:
         leaderboard_path = Path(args.leaderboard_csv).expanduser().resolve()
@@ -455,7 +489,8 @@ def main() -> int:
         f"score_releases={args.score_releases}, min_target_quarter={args.min_target_quarter}, "
         f"md_vintage_panel={md_panel_path}, qd_vintage_panel={panel_path}, "
         f"exclude_years={sorted({int(y) for y in args.exclude_years})}, "
-        f"select_models_from_leaderboard={bool(args.select_models_from_leaderboard)}"
+        f"select_models_from_leaderboard={bool(args.select_models_from_leaderboard)}, "
+        f"asof_db={str(Path(args.asof_db).expanduser().resolve()) if str(args.asof_db).strip() else 'disabled'}"
     )
     if selection_info is not None:
         print(
@@ -467,23 +502,28 @@ def main() -> int:
             f"top5_realtime={selection_info['top5_models_realtime']}"
         )
 
-    predictions = run_backtest(
-        models=requested_models,
-        release_table=release_table,
-        vintage_panel=vintage_panel,
-        horizons=args.horizons,
-        target_col=args.target_col,
-        train_window=args.train_window,
-        rolling_size=args.rolling_size,
-        max_origins=args.max_origins,
-        min_train_observations=args.min_train_observations,
-        origin_schedule=args.origin_schedule,
-        release_stages=args.score_releases,
-        min_target_quarter=args.min_target_quarter,
-        md_panel_path=md_panel_path,
-        qd_panel_path=panel_path,
-        mixed_freq_excluded_years=args.exclude_years,
-    )
+    try:
+        predictions = run_backtest(
+            models=requested_models,
+            release_table=release_table,
+            vintage_panel=vintage_panel,
+            horizons=args.horizons,
+            target_col=args.target_col,
+            train_window=args.train_window,
+            rolling_size=args.rolling_size,
+            max_origins=args.max_origins,
+            min_train_observations=args.min_train_observations,
+            origin_schedule=args.origin_schedule,
+            release_stages=args.score_releases,
+            min_target_quarter=args.min_target_quarter,
+            md_panel_path=md_panel_path,
+            qd_panel_path=panel_path,
+            mixed_freq_excluded_years=args.exclude_years,
+            asof_provider=asof_provider,
+        )
+    finally:
+        if asof_provider is not None:
+            asof_provider.close()
     if selection_info is not None and args.add_leaderboard_ensembles:
         predictions = _append_leaderboard_ensembles(
             predictions=predictions,
