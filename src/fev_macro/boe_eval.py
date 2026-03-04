@@ -13,7 +13,7 @@ def _import_boe() -> "module":
             "Missing optional dependency 'forecast_evaluation'. Install with:\n"
             "  pip install forecast_evaluation\n"
             "or:\n"
-            "  pip install -r requirements-boe.txt"
+            "  pip install -r requirements.txt"
         ) from exc
     return fe
 

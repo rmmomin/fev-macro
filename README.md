@@ -97,7 +97,7 @@ make plot-2025q4
 Use BoE-style schema exports, DM tests, rolling/fluctuation diagnostics, and plots:
 
 ```bash
-pip install -r requirements-boe.txt
+pip install -r requirements.txt
 
 python -m fev_macro.boe export --predictions_csv results/realtime_oos/predictions.csv --release_table_csv data/panels/gdpc1_releases_first_second_third.csv --out_dir results/boe_export --truth first --variable GDPC1 --metric levels --forecast_value_col y_hat_level
 python -m fev_macro.boe eval --forecasts_csv results/boe_export/boe_forecasts.csv --outturns_csv results/boe_export/boe_outturns.csv --k 0 --benchmark_model naive_last --out_dir results/boe_results

@@ -480,10 +480,21 @@ def _load_md_vintage_quarterly_features(
 
     for col in selected:
         d[col] = pd.to_numeric(d[col], errors="coerce")
+
+    # Preserve within-quarter monthly ragged-edge detail (m1/m2/m3) instead
+    # of collapsing each variable to one quarterly point.
     d["quarter"] = d["timestamp"].dt.to_period("Q-DEC")
-    q = d.groupby("quarter", sort=True)[selected].last().ffill().bfill()
-    q.columns = [f"md_{c}" for c in q.columns]
-    out = q
+    d["month_slot"] = ((d["timestamp"].dt.month - 1) % 3 + 1).astype(int)
+
+    pieces: list[pd.DataFrame] = []
+    for col in selected:
+        sub = d[["quarter", "month_slot", col]].copy()
+        pvt = sub.pivot_table(index="quarter", columns="month_slot", values=col, aggfunc="last")
+        pvt = pvt.reindex(columns=[1, 2, 3])
+        pvt.columns = [f"md_{col}_m{int(slot)}" for slot in pvt.columns]
+        pieces.append(pvt)
+
+    out = pd.concat(pieces, axis=1).sort_index() if pieces else pd.DataFrame()
     _MD_VINTAGE_CACHE[key] = out
     return out
 
@@ -507,7 +518,8 @@ def _augment_with_md_features(
         return out
 
     q = pd.PeriodIndex(out["quarter"], freq="Q-DEC")
-    q_md_aligned = q_md.reindex(q).ffill().bfill()
+    # Keep missing month-slot values for not-yet-released data points.
+    q_md_aligned = q_md.reindex(q)
     for col in q_md_aligned.columns:
         out[col] = pd.to_numeric(q_md_aligned[col], errors="coerce").to_numpy(dtype=float)
     return out
@@ -698,7 +710,8 @@ def _select_covariates_for_wrapped_models(train_df: pd.DataFrame, target_col: st
         "__origin_vintage",
         "__origin_schedule",
     }
-    candidates: list[str] = []
+    md_candidates: list[str] = []
+    other_candidates: list[str] = []
     for col in train_df.columns:
         if col in exclude:
             continue
@@ -707,8 +720,24 @@ def _select_covariates_for_wrapped_models(train_df: pd.DataFrame, target_col: st
         s = pd.to_numeric(train_df[col], errors="coerce")
         if s.notna().sum() < 8:
             continue
-        candidates.append(col)
-    return candidates[:max_covariates]
+        if str(col).startswith("md_"):
+            md_candidates.append(col)
+        else:
+            other_candidates.append(col)
+    candidates = [*md_candidates, *other_candidates]
+    selected = candidates[:max_covariates]
+
+    # When both MD and non-MD covariates are available, enforce at least one
+    # non-MD covariate so wrapped models always blend QD + MD information.
+    if md_candidates and other_candidates and max_covariates >= 2 and selected:
+        has_other = any(col in other_candidates for col in selected)
+        if not has_other:
+            if len(selected) >= max_covariates:
+                selected[-1] = other_candidates[0]
+            else:
+                selected.append(other_candidates[0])
+
+    return selected
 
 
 def _build_single_series_datasets(
@@ -771,10 +800,21 @@ def _build_single_series_datasets(
 
 
 class _WrappedFevModel(RealtimeModel):
-    def __init__(self, name: str, builder, max_covariates: int = 120) -> None:
+    def __init__(
+        self,
+        name: str,
+        builder,
+        max_covariates: int = 120,
+        include_md_features: bool = True,
+        max_md_covariates: int = 24,
+        md_panel_path: Path = DEFAULT_MD_PANEL_PATH,
+    ) -> None:
         super().__init__(name=name)
         self._builder = builder
         self.max_covariates = int(max_covariates)
+        self.include_md_features = bool(include_md_features)
+        self.max_md_covariates = int(max_md_covariates)
+        self.md_panel_path = Path(md_panel_path)
         self._model = None
 
     def _get_model(self):
@@ -783,11 +823,19 @@ class _WrappedFevModel(RealtimeModel):
         return self._model
 
     def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
-        y = _target_array(train_df=train_df, target_col=target_col)
-        covs = _select_covariates_for_wrapped_models(train_df=train_df, target_col=target_col, max_covariates=self.max_covariates)
+        df = train_df.copy().sort_values("quarter").reset_index(drop=True)
+        if self.include_md_features:
+            df = _augment_with_md_features(
+                train_df=df,
+                md_panel_path=self.md_panel_path,
+                max_md_covariates=self.max_md_covariates,
+            )
+
+        y = _target_array(train_df=df, target_col=target_col)
+        covs = _select_covariates_for_wrapped_models(train_df=df, target_col=target_col, max_covariates=self.max_covariates)
         try:
             past_data, future_data, task = _build_single_series_datasets(
-                train_df=train_df,
+                train_df=df,
                 target_col=target_col,
                 horizon=horizon,
                 covariate_cols=covs,
@@ -802,10 +850,21 @@ class _WrappedFevModel(RealtimeModel):
 
 
 class _WrappedFevGrowthModel(RealtimeModel):
-    def __init__(self, name: str, builder, max_covariates: int = 120) -> None:
+    def __init__(
+        self,
+        name: str,
+        builder,
+        max_covariates: int = 120,
+        include_md_features: bool = True,
+        max_md_covariates: int = 24,
+        md_panel_path: Path = DEFAULT_MD_PANEL_PATH,
+    ) -> None:
         super().__init__(name=name)
         self._builder = builder
         self.max_covariates = int(max_covariates)
+        self.include_md_features = bool(include_md_features)
+        self.max_md_covariates = int(max_md_covariates)
+        self.md_panel_path = Path(md_panel_path)
         self._model = None
 
     def _get_model(self):
@@ -815,7 +874,15 @@ class _WrappedFevGrowthModel(RealtimeModel):
 
     def forecast_levels(self, train_df: pd.DataFrame, horizon: int, target_col: str) -> np.ndarray:
         try:
-            growth_df, growth_target_col, last_level = _build_growth_target_frame(train_df=train_df, target_col=target_col)
+            df = train_df.copy().sort_values("quarter").reset_index(drop=True)
+            if self.include_md_features:
+                df = _augment_with_md_features(
+                    train_df=df,
+                    md_panel_path=self.md_panel_path,
+                    max_md_covariates=self.max_md_covariates,
+                )
+
+            growth_df, growth_target_col, last_level = _build_growth_target_frame(train_df=df, target_col=target_col)
             g_hist = pd.to_numeric(growth_df[growth_target_col], errors="coerce").dropna().to_numpy(dtype=float)
             if g_hist.size < 8:
                 return _growth_path_from_last_growth(last_level=last_level, g_history=g_hist, horizon=horizon)
@@ -1478,6 +1545,24 @@ class Chronos2GrowthRealtimeModel(_WrappedFevGrowthModel):
         )
 
 
+class LSTMMultivariateRealtimeModel(_WrappedFevModel):
+    def __init__(self) -> None:
+        super().__init__(
+            name="lstm_multivariate",
+            builder=lambda: __import__("fev_macro.models.lstm_models", fromlist=["LSTMMultivariateModel"]).LSTMMultivariateModel(),
+            max_covariates=80,
+        )
+
+
+class LSTMMultivariateGrowthRealtimeModel(_WrappedFevGrowthModel):
+    def __init__(self) -> None:
+        super().__init__(
+            name="lstm_multivariate_growth",
+            builder=lambda: __import__("fev_macro.models.lstm_models", fromlist=["LSTMMultivariateModel"]).LSTMMultivariateModel(),
+            max_covariates=80,
+        )
+
+
 class MixedFreqDFMMDVintageModel(RealtimeModel):
     def __init__(
         self,
@@ -1534,9 +1619,20 @@ class MixedFreqDFMMDVintageModel(RealtimeModel):
             raise ValueError(f"No FRED-MD vintage rows for {vintage_id}")
         covars = [c for c in sub.columns if c not in {"vintage", "timestamp"}]
         sub = sub.sort_values("timestamp")
-        sub[covars] = sub[covars].ffill().bfill().fillna(0.0)
+        for c in covars:
+            sub[c] = pd.to_numeric(sub[c], errors="coerce")
         sub["quarter"] = sub["timestamp"].dt.to_period("Q-DEC")
-        q = sub.groupby("quarter", sort=True)[covars].mean(numeric_only=True).ffill().bfill().fillna(0.0)
+        sub["month_slot"] = ((sub["timestamp"].dt.month - 1) % 3 + 1).astype(int)
+
+        pieces: list[pd.DataFrame] = []
+        for col in covars:
+            frame = sub[["quarter", "month_slot", col]].copy()
+            pvt = frame.pivot_table(index="quarter", columns="month_slot", values=col, aggfunc="last")
+            pvt = pvt.reindex(columns=[1, 2, 3])
+            pvt.columns = [f"{col}_m{int(slot)}" for slot in pvt.columns]
+            pieces.append(pvt)
+
+        q = pd.concat(pieces, axis=1).sort_index() if pieces else pd.DataFrame()
         if self.excluded_years:
             q = q.loc[~q.index.year.isin(list(self.excluded_years))]
         self._cache_quarterly[vintage_id] = q
@@ -1780,6 +1876,8 @@ BUILTIN_MODELS: dict[str, type[RealtimeModel]] = {
     "mixed_freq_dfm_md_growth": MixedFreqDFMMDVintageGrowthModel,
     "chronos2": Chronos2RealtimeModel,
     "chronos2_growth": Chronos2GrowthRealtimeModel,
+    "lstm_multivariate": LSTMMultivariateRealtimeModel,
+    "lstm_multivariate_growth": LSTMMultivariateGrowthRealtimeModel,
     "ensemble_avg_top3": EnsembleAvgTop3RealtimeModel,
     "ensemble_avg_top3_unprocessed_ll": EnsembleAvgTop3UnprocessedLLRealtimeModel,
     "ensemble_avg_top3_processed_g": EnsembleAvgTop3ProcessedGRealtimeModel,

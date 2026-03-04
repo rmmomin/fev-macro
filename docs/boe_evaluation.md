@@ -5,7 +5,7 @@ This project includes optional adapters for the Bank of England `forecast_evalua
 Install optional dependencies:
 
 ```bash
-pip install -r requirements-boe.txt
+pip install -r requirements.txt
 ```
 
 ## 1) Export fev-macro outputs to BoE schema

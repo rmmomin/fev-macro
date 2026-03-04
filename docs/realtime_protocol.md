@@ -37,6 +37,11 @@ Optional `--fail_on_validate` exits nonzero when spike flags are present.
 - Truth comes from release-stage realtime SAAR columns.
 - If realtime SAAR truth columns are missing, code emits loud warnings before fallback behavior.
 
+## Known issue (as-of path)
+- As-of nowcast traces can still look too stepwise relative to day-by-day release flow.
+- Root cause: even with realtime as-of ingestion, modeling currently operates on quarter-indexed training rows and selected monthly-slot features, so many calendar-day updates do not alter the quarter state consumed by models.
+- Action item: add a fully event-driven mixed-frequency state update path (daily/monthly event timestamps propagated directly into model inputs) and report per-day feature delta diagnostics alongside forecasts.
+
 ## References
 - ALFRED: <https://alfred.stlouisfed.org>
 - Historical FRED vintages: <https://www.stlouisfed.org/research/economists/mccracken/fred-databases>

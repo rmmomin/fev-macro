@@ -14,3 +14,7 @@ duckdb>=1.0.0
 torch>=2.2.0
 chronos-forecasting>=0.4.0
 # autogluon.timeseries>=1.4.0
+
+# BoE evaluation support (optional runtime components used by docs/workflow):
+forecast_evaluation
+shiny

@@ -972,7 +972,7 @@ def _write_boe_outputs(
     except ImportError as exc:
         msg = (
             "BoE evaluation skipped because optional dependency 'forecast_evaluation' "
-            "is unavailable. Install with: pip install -r requirements-boe.txt"
+            "is unavailable. Install with: pip install -r requirements.txt"
         )
         if strict:
             raise RuntimeError(msg) from exc
