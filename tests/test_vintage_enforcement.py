@@ -299,6 +299,7 @@ def test_snapshot_allow_and_window_vintage_provenance_outputs(
             "--disable_covariates",
             "--disable_historical_vintages",
             "--allow_snapshot_eval",
+            "--no-strict-pit",
             "--eval_release_stages",
             "first",
             "--results_dir",
@@ -319,6 +320,7 @@ def test_snapshot_allow_and_window_vintage_provenance_outputs(
     historical_args = parse_args_with_provenance(
         parser,
         [
+            "--no-strict-pit",
             "--profile",
             "smoke",
             "--models",

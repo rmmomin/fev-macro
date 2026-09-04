@@ -25,6 +25,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from fev_macro.asof_store import AsofStore  # noqa: E402
+from fev_macro.pit import PITError  # noqa: E402
 from fev_macro.fred_aliases import candidate_series_ids  # noqa: E402
 
 FRED_BASE = "https://api.stlouisfed.org/fred"
@@ -142,16 +143,16 @@ def _request_json(
                 stats.retries += 1
                 time.sleep(retry_backoff_seconds * (2**attempt))
                 continue
-            raise FredAPIError(f"HTTP {status} for {full_url}") from e
+            raise FredAPIError(f"HTTP {status} for {url}") from e
         except Exception as e:
             last_err = e
             if attempt < max_retries:
                 stats.retries += 1
                 time.sleep(retry_backoff_seconds * (2**attempt))
                 continue
-            raise FredAPIError(f"Failed request {full_url}") from e
+            raise FredAPIError(f"Failed request {url}") from e
 
-    raise FredAPIError(f"Request failed: {full_url}") from last_err
+    raise FredAPIError(f"Request failed: {url}") from last_err
 
 
 def fred_series_meta(
@@ -173,37 +174,6 @@ def fred_series_meta(
     )
     items = payload.get("seriess", [])
     return items[0] if items else None
-
-
-def fred_series_vintagedates(
-    *,
-    series_id: str,
-    realtime_start: str,
-    realtime_end: str,
-    api_key: str,
-    args: argparse.Namespace,
-    rate_limiter: RateLimiter,
-    stats: APIStats,
-) -> list[str]:
-    payload = _request_json(
-        url=f"{FRED_BASE}/series/vintagedates",
-        params={
-            "series_id": series_id,
-            "realtime_start": realtime_start,
-            "realtime_end": realtime_end,
-            "api_key": api_key,
-            "file_type": "json",
-            "sort_order": "asc",
-            "limit": 10000,
-            "offset": 0,
-        },
-        timeout_seconds=args.timeout_seconds,
-        max_retries=args.max_retries,
-        retry_backoff_seconds=args.retry_backoff_seconds,
-        rate_limiter=rate_limiter,
-        stats=stats,
-    )
-    return [str(x) for x in payload.get("vintage_dates", [])]
 
 
 def fred_series_observations(
@@ -265,18 +235,6 @@ def read_template_variables(path: Path) -> list[str]:
     return [c for c in cols[1:] if isinstance(c, str) and c.strip() and not c.startswith("Unnamed")]
 
 
-def _parse_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    s = str(value).strip()
-    if not s or s == "." or s.upper() in {"NA", "NAN"}:
-        return None
-    try:
-        return float(s)
-    except Exception:
-        return None
-
-
 def backfill_series_output_type_1(
     *,
     store: AsofStore,
@@ -286,193 +244,71 @@ def backfill_series_output_type_1(
     rate_limiter: RateLimiter,
     stats: APIStats,
 ) -> None:
-    page_limit = min(int(args.page_limit), FRED_PAGE_LIMIT_MAX)
+    sync_series_intervals(
+        store=store, series_id=series_id, api_key=api_key, args=args,
+        rate_limiter=rate_limiter, stats=stats,
+        realtime_start=args.backfill_realtime_start,
+        realtime_end=args.backfill_realtime_end,
+    )
+
+
+def sync_series_intervals(*, store, series_id, api_key, args, rate_limiter, stats,
+                          realtime_start, realtime_end) -> int:
+    """Atomically replay a complete output_type=1 interval query.
+
+    No current-FRED fallback. Overlap is replayed (including unchanged values and
+    missing revisions); checkpoint dates are not proof a prior page completed.
+    """
+    limit = int(args.page_limit)
+    if not 1 <= limit <= FRED_PAGE_LIMIT_MAX:
+        raise PITError("page_limit must be between 1 and 100000")
+    offset, expected, inserted = 0, None, 0
+    store._con.execute("BEGIN TRANSACTION")
     try:
-        offset = 0
         while True:
+            params = dict(series_id=series_id, output_type=1, units="lin",
+                          realtime_start=realtime_start, realtime_end=realtime_end,
+                          observation_start=args.observation_start, observation_end=args.observation_end,
+                          sort_order="asc", limit=limit, offset=offset)
             payload = fred_series_observations(
-                series_id=series_id,
-                api_key=api_key,
-                args=args,
-                rate_limiter=rate_limiter,
-                stats=stats,
-                params={
-                    "output_type": 1,
-                    "realtime_start": args.backfill_realtime_start,
-                    "realtime_end": args.backfill_realtime_end,
-                    "observation_start": args.observation_start,
-                    "observation_end": args.observation_end,
-                    "sort_order": "asc",
-                    "limit": page_limit,
-                    "offset": offset,
-                },
-            )
+                series_id=series_id, api_key=api_key, args=args,
+                rate_limiter=rate_limiter, stats=stats, params=params)
+            count = int(payload["count"])
+            if expected is None:
+                expected = count
+            if count != expected or int(payload.get("offset", -1)) != offset:
+                raise PITError("ALFRED pagination changed during sync; retry the complete query")
             obs = payload.get("observations", [])
-            if not obs:
+            if len(obs) != min(limit, expected - offset):
+                raise PITError("Incomplete ALFRED page; no partial history was committed")
+            inserted += store.ingest_alfred_response(payload, _clean_params(params))
+            offset += len(obs)
+            if offset == expected:
                 break
-
-            rows: list[dict[str, Any]] = []
-            for o in obs:
-                v = _parse_float(o.get("value"))
-                if v is None:
-                    continue
-                rows.append(
-                    {
-                        "series_id": series_id,
-                        "obs_ts": o.get("date"),
-                        "asof_ts": o.get("realtime_start"),
-                        "value": v,
-                    }
-                )
-            if rows:
-                store.ingest_versions(pd.DataFrame(rows), source="alfred_output_type_1")
-
-            offset += page_limit
-            if len(obs) < page_limit:
-                break
-    except FredAPIError as exc:
-        # Some series are available in FRED but not as full ALFRED vintage histories.
-        # Fall back to point-in-time availability using obs date as as-of timestamp.
-        if "HTTP 400" not in str(exc):
-            raise
-        offset = 0
-        while True:
-            payload = fred_series_observations(
-                series_id=series_id,
-                api_key=api_key,
-                args=args,
-                rate_limiter=rate_limiter,
-                stats=stats,
-                params={
-                    "observation_start": args.observation_start,
-                    "observation_end": args.observation_end,
-                    "sort_order": "asc",
-                    "limit": page_limit,
-                    "offset": offset,
-                },
-            )
-            obs = payload.get("observations", [])
-            if not obs:
-                break
-            rows: list[dict[str, Any]] = []
-            for o in obs:
-                v = _parse_float(o.get("value"))
-                if v is None:
-                    continue
-                obs_date = o.get("date")
-                rows.append(
-                    {
-                        "series_id": series_id,
-                        "obs_ts": obs_date,
-                        "asof_ts": obs_date,
-                        "value": v,
-                    }
-                )
-            if rows:
-                store.ingest_versions(pd.DataFrame(rows), source="fred_observations_fallback")
-
-            offset += page_limit
-            if len(obs) < page_limit:
-                break
+        if expected == 0:
+            raise PITError(f"No verified ALFRED history for {series_id} in the requested range")
+        store._con.execute("COMMIT")
+    except Exception:
+        store._con.execute("ROLLBACK")
+        raise
+    return inserted
 
 
-def _infer_vintage_value_key(series_id: str, vintage_date: str, observations: list[dict[str, Any]]) -> str | None:
-    if not observations:
-        return None
-    suffix = pd.to_datetime(vintage_date).strftime("%Y%m%d")
-    sample = observations[0]
-    direct = f"{series_id}_{suffix}"
-    if direct in sample:
-        return direct
-    keys = [k for k in sample.keys() if k != "date" and isinstance(k, str)]
-    candidates = [k for k in keys if k.endswith(suffix)]
-    if len(candidates) == 1:
-        return candidates[0]
-    if candidates:
-        for k in candidates:
-            if series_id in k:
-                return k
-        return candidates[0]
-    return None
+def update_series_intervals(**kwargs) -> int:
+    """Updates replay output_type=1 with pagination.
 
-
-def update_series_from_vintages_output_type_3(
-    *,
-    store: AsofStore,
-    series_id: str,
-    api_key: str,
-    args: argparse.Namespace,
-    rate_limiter: RateLimiter,
-    stats: APIStats,
-) -> int:
+    Output_type=3 uses date-suffixed value keys and reports changes. Its old
+    ingestion skipped missing revisions and replayed no previously seen date.
+    Use one validated interval format for both backfill and update.
+    """
+    store, series_id, args = kwargs["store"], kwargs["series_id"], kwargs["args"]
     last = store.max_asof_ts(series_id)
     if last is None:
         return 0
-
-    start_dt = (last - pd.Timedelta(days=int(args.lookback_days))).date()
-    try:
-        vintages = fred_series_vintagedates(
-            series_id=series_id,
-            realtime_start=start_dt.isoformat(),
-            realtime_end=FRED_FAR_FUTURE_DATE,
-            api_key=api_key,
-            args=args,
-            rate_limiter=rate_limiter,
-            stats=stats,
-        )
-    except FredAPIError as exc:
-        if "HTTP 400" in str(exc):
-            return 0
-        raise
-
-    cutoff_date = last.date()
-    new_vintages = [d for d in vintages if pd.to_datetime(d).date() > cutoff_date]
-    if not new_vintages:
-        return 0
-
-    inserted_attempts = 0
-    for vd in new_vintages:
-        payload = fred_series_observations(
-            series_id=series_id,
-            api_key=api_key,
-            args=args,
-            rate_limiter=rate_limiter,
-            stats=stats,
-            params={
-                "output_type": 3,
-                "vintage_dates": vd,
-                "observation_start": args.observation_start,
-                "observation_end": args.observation_end,
-                "sort_order": "asc",
-                "limit": FRED_PAGE_LIMIT_MAX,
-            },
-        )
-        obs = payload.get("observations", [])
-        if not obs:
-            continue
-        val_key = _infer_vintage_value_key(series_id, vd, obs)
-        if not val_key:
-            continue
-
-        rows: list[dict[str, Any]] = []
-        for o in obs:
-            v = _parse_float(o.get(val_key))
-            if v is None:
-                continue
-            rows.append(
-                {
-                    "series_id": series_id,
-                    "obs_ts": o.get("date"),
-                    "asof_ts": vd,
-                    "value": v,
-                }
-            )
-        if rows:
-            inserted_attempts += store.ingest_versions(
-                pd.DataFrame(rows),
-                source=f"alfred_output_type_3:{vd}",
-            )
-    return inserted_attempts
+    start = max(pd.Timestamp(args.backfill_realtime_start),
+                last - pd.Timedelta(days=int(args.lookback_days)))
+    return sync_series_intervals(**kwargs, realtime_start=start.date().isoformat(),
+                                 realtime_end=args.backfill_realtime_end)
 
 
 def parse_args() -> argparse.Namespace:
@@ -487,6 +323,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--qd_template", type=str, default=DEFAULT_QD_TEMPLATE)
     p.add_argument("--universe", type=str, choices=["md", "qd", "both"], default="both")
 
+    p.add_argument("--series", nargs="+", help="Explicit FRED IDs; bypass present-day template universes.")
     p.add_argument("--series_limit", type=int, default=None, help="Debug cap on number of template variables.")
     p.add_argument("--backfill_missing", action=argparse.BooleanOptionalAction, default=True)
 
@@ -516,10 +353,12 @@ def main() -> int:
     rate_limiter = RateLimiter(min_interval_seconds=float(args.min_request_interval_seconds))
 
     variables: list[tuple[str, str]] = []
-    if args.universe in ("md", "both"):
+    if not args.series and args.universe in ("md", "both"):
         variables.extend([("md", v) for v in read_template_variables(Path(args.md_template))])
-    if args.universe in ("qd", "both"):
+    if not args.series and args.universe in ("qd", "both"):
         variables.extend([("qd", v) for v in read_template_variables(Path(args.qd_template))])
+    if args.series:
+        variables = [("qd", sid) for sid in args.series]
     if args.series_limit is not None:
         variables = variables[: int(args.series_limit)]
 
@@ -594,9 +433,12 @@ def main() -> int:
                 checkpoint = store.max_asof_ts(sid)
                 checkpoint_cache[sid] = checkpoint
 
+            if checkpoint is None and not args.backfill_missing:
+                raise PITError(f"No verified history for {sid}; run a backfill first")
+
             if checkpoint is not None:
                 print(f"[update] {sid} (checkpoint={checkpoint.date().isoformat()})")
-                update_series_from_vintages_output_type_3(
+                update_series_intervals(
                     store=store,
                     series_id=sid,
                     api_key=api_key,
@@ -611,6 +453,7 @@ def main() -> int:
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "db": str(Path(args.db).expanduser().resolve()),
         "universe": args.universe,
+        "pit_policy": "verified_ALFRED_intervals_only; same-day vintages excluded",
         "resolved_variables": resolved_vars,
         "resolved_unique_series": len(series_ids),
         "failures_count": len(failures),
@@ -636,7 +479,7 @@ def main() -> int:
     print(f"Wrote report: {report_path}")
 
     store.close()
-    return 0
+    return 2 if failures else 0
 
 
 if __name__ == "__main__":

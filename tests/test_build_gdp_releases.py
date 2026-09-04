@@ -56,7 +56,7 @@ def test_build_release_dataset_realtime_growth_uses_single_vintage_snapshot() ->
         }
     )
 
-    out = build_release_dataset(wide=wide, series="GDPC1", qd_panel=qd_panel, vintage_select="next")
+    out = build_release_dataset(strict_pit=False, wide=wide, series="GDPC1", qd_panel=qd_panel, vintage_select="next")
 
     assert np.isnan(out.loc[0, "qoq_saar_growth_realtime_first_pct"])
     assert np.isnan(out.loc[0, "qoq_saar_growth_realtime_second_pct"])
@@ -98,7 +98,7 @@ def test_reindex_break_regression_uses_same_vintage_for_numerator_and_denominato
         }
     )
 
-    out = build_release_dataset(wide=wide, series="GDPC1", qd_panel=qd_panel, vintage_select="next")
+    out = build_release_dataset(strict_pit=False, wide=wide, series="GDPC1", qd_panel=qd_panel, vintage_select="next")
 
     # Old stitched-level approach mixes vintages and creates a fake jump.
     old_stitched = _saar(float(out.loc[1, "first_release"]), float(out.loc[0, "first_release"]))
@@ -135,7 +135,7 @@ def test_format_release_output_keeps_only_alfred_saar_growth_and_alfred_levels()
         }
     )
 
-    full = build_release_dataset(wide=wide, series="GDPC1", qd_panel=qd_panel, vintage_select="next")
+    full = build_release_dataset(strict_pit=False, wide=wide, series="GDPC1", qd_panel=qd_panel, vintage_select="next")
     out = _format_release_output_for_alfred_qoq_saar(full)
 
     growth_cols = [c for c in out.columns if c.startswith("qoq_")]
@@ -186,3 +186,22 @@ def test_validation_smoke_no_2023_q2_q3_spike_flags_with_panel_growth(tmp_path: 
         & report_df["quarter"].isin({"2023Q2", "2023Q3"})
     ]
     assert spike_rows.empty
+
+
+def test_strict_calendar_ignores_extra_non_stage_vintage():
+    wide = pd.DataFrame({
+        'observation_date': ['2018-10-01', '2019-01-01'],
+        'GDPC1_20190426': [100., 101.],
+        'GDPC1_20190427': [100., 101.],  # extra archive snapshot is not the second release
+        'GDPC1_20190530': [200., 202.],
+        'GDPC1_20190627': [200., 202.],  # unchanged third estimate still has its own stage
+    })
+    calendar = pd.DataFrame(dict(quarter=['2019Q1']*3, stage=['first','second','third'],
+        release_date=['2019-04-26','2019-05-30','2019-06-27'],
+        source_url=['https://www.bea.gov/news/2019/example']*3))
+    out = build_release_dataset(wide=wide, series='GDPC1', release_calendar=calendar)
+    row = out.loc[out.observation_date == pd.Timestamp('2019-01-01')].iloc[0]
+    assert row.second_release_date == pd.Timestamp('2019-05-30')
+    assert row.third_release_date == pd.Timestamp('2019-06-27')
+    assert row.alfred_prev_level_second == 200.
+    assert np.isclose(row.qoq_saar_growth_alfred_first_pct, row.qoq_saar_growth_alfred_second_pct)

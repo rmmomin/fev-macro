@@ -39,6 +39,7 @@ def parse_args() -> argparse.Namespace:
             "using mixed-frequency multivariate models."
         )
     )
+    p.add_argument("--strict-pit", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--asof_db", type=str, default="data/realtime/asof.duckdb")
     p.add_argument("--release_csv", type=str, default="data/panels/gdpc1_releases_first_second_third.csv")
     p.add_argument("--target_quarter", type=str, default="2025Q4")
@@ -226,6 +227,9 @@ def _make_forecast_plot(
 
 def main() -> int:
     args = parse_args()
+    if args.strict_pit:
+        raise ValueError("This legacy mixed-frequency path is not PIT-certified; use run_pit_backtest.py "
+                         "or explicitly opt into exploration with --no-strict-pit")
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)

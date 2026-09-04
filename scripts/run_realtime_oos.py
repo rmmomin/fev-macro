@@ -258,10 +258,12 @@ def _append_leaderboard_ensembles(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run vintage-correct rolling OOS GDP evaluation scored against first-release GDP levels "
+            "Run exploratory vintage-panel GDP evaluation (not PIT-certified), scored against GDP levels "
             "and SAAR growth derived from first-release levels."
         )
     )
+    parser.add_argument("--strict-pit", action=argparse.BooleanOptionalAction, default=True,
+                        help="Reject legacy origin/model paths; use run_pit_backtest.py")
     parser.add_argument(
         "--release_csv",
         type=str,
@@ -414,6 +416,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.strict_pit:
+        raise ValueError("Strict PIT requires explicit origins and release calendar: use scripts/run_pit_backtest.py. "
+                         "Pass --no-strict-pit only for exploratory legacy results.")
     mode = normalize_mode(args.mode)
 
     requested_models = resolve_mode_models(mode=mode, requested_models=args.models)
@@ -438,6 +443,7 @@ def main() -> int:
             db_path=Path(args.asof_db).expanduser().resolve(),
             covariate_mode=mode,
             universe=args.asof_universe,
+            strict_pit=True,
             historical_qd_dir=args.asof_historical_qd_dir,
         )
 
@@ -520,6 +526,7 @@ def main() -> int:
             qd_panel_path=panel_path,
             mixed_freq_excluded_years=args.exclude_years,
             asof_provider=asof_provider,
+            strict_pit=False,
         )
     finally:
         if asof_provider is not None:

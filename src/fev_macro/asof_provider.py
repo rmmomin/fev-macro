@@ -7,11 +7,8 @@ import numpy as np
 import pandas as pd
 
 from .asof_store import AsofStore
-from .data import (
-    DEFAULT_SOURCE_SERIES_CANDIDATES,
-    build_real_gdp_target_series_from_time_rows,
-    load_fred_qd_transform_codes,
-)
+from .pit import PITError, information_date
+from .fred_transforms import fred_transform
 from .fred_aliases import candidate_series_ids, dedupe_preserve_order
 
 CovariateMode = Literal["unprocessed", "processed"]
@@ -35,28 +32,6 @@ def _parse_universe(value: str) -> tuple[str, ...]:
     raise ValueError("universe must be one of {'qd','md','both'}")
 
 
-def _to_quarterly_mean(frame: pd.DataFrame, timestamp_col: str = "timestamp") -> pd.DataFrame:
-    if frame.empty:
-        return pd.DataFrame(columns=[timestamp_col])
-
-    out = frame.copy()
-    out[timestamp_col] = pd.to_datetime(out[timestamp_col], errors="coerce")
-    out = out.dropna(subset=[timestamp_col]).sort_values(timestamp_col).reset_index(drop=True)
-    if out.empty:
-        return pd.DataFrame(columns=[timestamp_col])
-
-    numeric_cols = [c for c in out.columns if c != timestamp_col]
-    if not numeric_cols:
-        return pd.DataFrame(columns=[timestamp_col])
-
-    out[numeric_cols] = out[numeric_cols].apply(pd.to_numeric, errors="coerce")
-    out["_quarter"] = out[timestamp_col].dt.to_period("Q-DEC")
-    grouped = out.groupby("_quarter", dropna=False, sort=True)[numeric_cols].mean().reset_index()
-    grouped[timestamp_col] = grouped["_quarter"].dt.to_timestamp(how="start")
-    grouped = grouped.drop(columns=["_quarter"]).sort_values(timestamp_col).reset_index(drop=True)
-    return grouped
-
-
 class AsofVintageProvider:
     """Build quarter-aligned as-of panels from versioned ALFRED/FRED observations."""
 
@@ -68,19 +43,24 @@ class AsofVintageProvider:
         universe: str = "both",
         historical_qd_dir: str | Path = "data/historical/qd",
         source_series_candidates: Sequence[str] | None = None,
+        strict_pit: bool = True,
+        series_specs: dict[str, dict] | None = None,
     ) -> None:
+        self.strict_pit = bool(strict_pit)
+        self.series_specs = series_specs or {}
         self.covariate_mode = _normalize_covariate_mode(covariate_mode)
         self.universes = _parse_universe(universe)
-        self.store = AsofStore(db_path=Path(db_path).expanduser().resolve())
-        self.source_series_candidates = tuple(source_series_candidates or DEFAULT_SOURCE_SERIES_CANDIDATES)
+        self.store = AsofStore(db_path=Path(db_path).expanduser().resolve(), strict_pit=self.strict_pit)
+        self.source_series_candidates = tuple(source_series_candidates or ("GDPC1",))
         self.available_series = self.store.available_series_ids()
         self.alias_maps: dict[str, dict[str, str]] = {
             uni: self.store.alias_map(universe=uni) for uni in self.universes
         }
         self._resolved_cache: dict[str, str | None] = {}
         self._qd_transform_codes: dict[str, int] = {}
-        if self.covariate_mode == "processed":
+        if self.covariate_mode == "processed" and not self.strict_pit:
             try:
+                from .data import load_fred_qd_transform_codes
                 self._qd_transform_codes = load_fred_qd_transform_codes(
                     historical_qd_dir=historical_qd_dir,
                     vintage_period=None,
@@ -96,6 +76,13 @@ class AsofVintageProvider:
         if not key:
             return None
         if key in self._resolved_cache:
+            return self._resolved_cache[key]
+
+        if self.strict_pit:
+            # Current alias tables/templates do not prove a historical mapping.
+            # A fixed explicit ID is part of the benchmark specification.
+            sid = self.series_specs.get(key, {}).get("series_id", key)
+            self._resolved_cache[key] = sid if sid in self.available_series else None
             return self._resolved_cache[key]
 
         for uni in self.universes:
@@ -136,6 +123,8 @@ class AsofVintageProvider:
         resolved_map, unresolved = self.resolve_variable_map(request_vars)
         series_ids = dedupe_preserve_order(resolved_map.values())
         if not series_ids:
+            if self.strict_pit:
+                raise PITError("No requested series has verified historical observations")
             return pd.DataFrame(), {
                 "resolved_series": {},
                 "unresolved_variables": unresolved,
@@ -144,61 +133,70 @@ class AsofVintageProvider:
                 "quarterly_rows": 0,
             }
 
-        snap = self.store.snapshot_wide(
-            asof_ts=asof_ts,
-            series_ids=series_ids,
-            obs_start=obs_start,
-            obs_end=obs_end,
-            timestamp_name="timestamp",
+        if target_col not in resolved_map:
+            raise PITError(f"Target {target_col} has no verified series mapping")
+        if self.strict_pit and resolved_map[target_col] != "GDPC1":
+            raise PITError("Strict real-GDP benchmark target must resolve to GDPC1")
+        snap = self.store.snapshot_long(
+            asof_ts=asof_ts, series_ids=series_ids, obs_start=obs_start, obs_end=obs_end,
+            include_asof_used=True,
         )
         if snap.empty:
-            return pd.DataFrame(), {
-                "resolved_series": resolved_map,
-                "unresolved_variables": unresolved,
-                "requested_variables": request_vars,
-                "snapshot_rows": 0,
-                "quarterly_rows": 0,
-            }
-
-        wide = pd.DataFrame({"timestamp": pd.to_datetime(snap["timestamp"], errors="coerce")})
-        for variable, series_id in resolved_map.items():
-            if series_id in snap.columns:
-                wide[variable] = pd.to_numeric(snap[series_id], errors="coerce")
-        if target_col not in wide.columns:
-            wide[target_col] = np.nan
-
-        quarterly = _to_quarterly_mean(wide, timestamp_col="timestamp")
-        if quarterly.empty:
-            return pd.DataFrame(), {
-                "resolved_series": resolved_map,
-                "unresolved_variables": unresolved,
-                "requested_variables": request_vars,
-                "snapshot_rows": int(len(snap)),
-                "quarterly_rows": 0,
-            }
-
-        allow_covs = [c for c in covariate_columns if c in quarterly.columns]
-        panel, panel_meta = build_real_gdp_target_series_from_time_rows(
-            wide_df=quarterly,
-            target_series_name=target_col,
-            target_transform="level",
-            source_series_candidates=(target_col, *self.source_series_candidates),
-            include_covariates=True,
-            covariate_allowlist=allow_covs,
-            apply_fred_transforms=(self.covariate_mode == "processed"),
-            fred_transform_codes=self._qd_transform_codes,
-            covariate_mode=self.covariate_mode,
-        )
-        panel = panel.rename(columns={"target": target_col})
-        panel["quarter"] = pd.PeriodIndex(pd.to_datetime(panel["timestamp"], errors="coerce"), freq="Q-DEC")
-        panel = panel.dropna(subset=["quarter"]).sort_values("quarter").reset_index(drop=True)
+            raise PITError("No observations at the requested information cutoff")
+        quarterly_series, coverage, inputs = {}, {}, []
+        for variable, sid in resolved_map.items():
+            sub = snap.loc[snap.series_id == sid].sort_values("obs_ts").copy()
+            if sub.empty:
+                if variable == target_col:
+                    raise PITError("No target available at forecast origin")
+                unresolved.append(variable)
+                continue
+            spec = self.series_specs.get(variable, {})
+            frequency = spec.get("frequency")
+            if frequency is None:
+                row = self.store._con.execute(
+                    "SELECT frequency_short FROM asof_series_meta WHERE series_id=?", [sid]).fetchone()
+                frequency = row[0] if row else None
+            if self.strict_pit and frequency not in {"M", "Q"}:
+                raise PITError(f"Explicit monthly/quarterly frequency required for {variable}")
+            frequency = frequency or "Q"
+            if variable == target_col and frequency != "Q":
+                raise PITError("GDP target must be quarterly levels")
+            native = pd.Series(sub.value.to_numpy(), index=pd.PeriodIndex(sub.obs_ts, freq=frequency))
+            if native.index.has_duplicates:
+                raise PITError(f"Multiple observations per native period for {variable}")
+            native = native.reindex(pd.period_range(native.index.min(), native.index.max(), freq=frequency))
+            code = spec.get("tcode", 1)
+            if variable != target_col and self.covariate_mode == "processed":
+                if self.strict_pit and "tcode" not in spec:
+                    raise PITError(f"Predeclared native-frequency transformation required for {variable}")
+                code = spec.get("tcode", self._qd_transform_codes.get(variable, 1))
+                native = pd.Series(fred_transform(native, int(code)).to_numpy(), index=native.index)
+            native = native.replace([np.inf, -np.inf], np.nan)
+            group = native.groupby(native.index.asfreq("Q-DEC"))
+            # Partial quarters use only released months; counts remain visible.
+            # No zeros/backfill are passed off as observations.
+            quarterly_series[variable] = group.mean()
+            coverage[variable] = {str(q): int(n) for q, n in group.count().items()}
+            for row in sub.itertuples():
+                inputs.append(dict(variable=variable, series_id=sid, obs_date=str(row.obs_ts.date()),
+                                   vintage_date=str(row.asof_used.date()), realtime_end=row.realtime_end,
+                                   value=None if pd.isna(row.value) else float(row.value),
+                                   source=row.source, provenance_id=row.provenance_id,
+                                   frequency=frequency, tcode=int(code)))
+        panel = pd.DataFrame(quarterly_series).sort_index()
+        if target_col not in panel or panel[target_col].notna().sum() == 0:
+            raise PITError("No usable GDP target at forecast origin")
+        panel.index.name = "quarter"
+        panel = panel.reset_index()
+        panel["timestamp"] = pd.PeriodIndex(panel.quarter, freq="Q-DEC").to_timestamp()
         return panel, {
-            "resolved_series": resolved_map,
-            "unresolved_variables": unresolved,
-            "requested_variables": request_vars,
-            "snapshot_rows": int(len(snap)),
-            "quarterly_rows": int(len(quarterly)),
-            "panel_meta": panel_meta,
+            "resolved_series": resolved_map, "unresolved_variables": sorted(set(unresolved)),
+            "requested_variables": request_vars, "snapshot_rows": len(snap),
+            "quarterly_rows": len(panel), "strict_pit": self.strict_pit,
+            "information_cutoff": information_date(asof_ts).date().isoformat() if self.strict_pit else str(asof_ts),
+            "availability_rule": "vintage_date < New York origin date" if self.strict_pit else "legacy inclusive",
+            "inputs": inputs, "quarterly_observation_counts": coverage,
         }
 
     def adapt_train_df(
@@ -215,7 +213,7 @@ class AsofVintageProvider:
         base = train_df.copy()
         if "quarter" not in base.columns:
             if "timestamp" not in base.columns:
-                return base, {"used_snapshot": False, "reason": "missing_quarter_and_timestamp"}
+                raise PITError("Cannot establish quarters for the requested PIT panel")
             base["quarter"] = pd.PeriodIndex(pd.to_datetime(base["timestamp"], errors="coerce"), freq="Q-DEC")
         else:
             base["quarter"] = pd.PeriodIndex(base["quarter"], freq="Q-DEC")
@@ -243,42 +241,12 @@ class AsofVintageProvider:
             obs_end=quarter_max.end_time,
         )
         if asof_panel.empty:
-            out_meta = dict(meta)
-            out_meta["used_snapshot"] = False
-            out_meta["reason"] = "empty_snapshot_panel"
-            return base, out_meta
-
-        merge_cols = ["quarter", target_col, *covariate_cols]
-        asof_subset_cols = [c for c in merge_cols if c in asof_panel.columns]
-        merged = base.merge(
-            asof_panel[asof_subset_cols],
-            on="quarter",
-            how="left",
-            suffixes=("", "__asof"),
-        )
-
-        replaced_total = 0
-        for col in [target_col, *covariate_cols]:
-            asof_col = f"{col}__asof"
-            if asof_col not in merged.columns:
-                continue
-
-            current = pd.to_numeric(merged[col], errors="coerce")
-            incoming = pd.to_numeric(merged[asof_col], errors="coerce")
-            changed = incoming.notna() & (~current.notna() | (np.abs(incoming - current) > 0.0))
-            replaced_total += int(changed.sum())
-
-            merged[col] = np.where(incoming.notna(), incoming, current)
-            merged = merged.drop(columns=[asof_col])
-
-        merged["quarter"] = pd.PeriodIndex(merged["quarter"], freq="Q-DEC")
-        ordered_cols = [c for c in train_df.columns if c in merged.columns]
-        for col in merged.columns:
-            if col not in ordered_cols:
-                ordered_cols.append(col)
-        merged = merged[ordered_cols]
-
+            raise PITError("Empty snapshot cannot be filled from a historical/latest panel")
+        # Base is a schema/time request only. Its values never enter the forecast.
+        out = asof_panel.loc[asof_panel.quarter.between(quarter_min, quarter_max)].copy()
+        for col in covariate_cols:
+            if col not in out:
+                out[col] = np.nan
         out_meta = dict(meta)
         out_meta["used_snapshot"] = True
-        out_meta["replaced_values"] = int(replaced_total)
-        return merged, out_meta
+        return out.reset_index(drop=True), out_meta

@@ -1,4 +1,5 @@
 .venv/
+.venv-pit/
 __pycache__/
 .pytest_cache/
 .env

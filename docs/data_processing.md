@@ -1,30 +1,11 @@
-# Data Processing
+# Data processing
 
-## Objective
-Produce one authoritative pair of panel artifacts per frequency:
-- Unprocessed: `data/panels/fred_qd_vintage_panel.parquet`, `data/panels/fred_md_vintage_panel.parquet`
-- Processed: `data/panels/fred_qd_vintage_panel_processed.parquet`, `data/panels/fred_md_vintage_panel_processed.parquet`
+The strict benchmark operates on raw ALFRED levels after selecting the origin information set. It applies declared FRED transform codes at the **native frequency**, then aggregates released observations to quarters. For example, mean monthly log differences is not a log difference of quarterly means. Unsupported frequencies/undefined transform specifications fail closed; missing observations stay missing through aggregation. The bridge estimates imputation and scaling on training rows only. See [the protocol](realtime_protocol.md).
 
-Canonical processed naming is `*_vintage_panel_processed.parquet`.
+The archive panel builders in `vintage_panels.py` apply transform codes from each file by default. `latest_file` code selection is exploratory. Contrary to earlier documentation, these builders do **not** implement the full FRED-MD outlier/trimming reference workflow. Separate development/nowcast scripts contain their own IQR processing; they are not the strict benchmark.
 
-## Pipeline
-1. Download historical vintage archives (`make download-historical`).
-2. Build unprocessed panels (`make panel-qd`, `make panel-md`).
-3. Build processed panels (`make panel-qd-processed`, `make panel-md-processed`).
-4. Build GDP release truth (`make build-gdp-releases`).
+Archive `vintage_timestamp` is a month label, not verified publication metadata. Current templates and aliases can encode a survivor universe or changed series definition. These archive panels cannot certify an intramonth historical information set. The legacy quarterly provider now avoids same-month labels and never fills targets/covariates from the later scaffold; those improvements alone do not establish PIT validity.
 
-## Processing semantics
-- QD/MD transform codes follow FRED database code semantics.
-- MD processing includes outlier/trimming behavior aligned with the published reference code path.
-- Legacy `*_process.parquet` files are only read as compatibility fallback in selected loaders; they are not produced by the core pipeline and not referenced by Makefile/README.
+Latest-data fetch/process scripts under `scripts/` write to `data/latest/` and `data/processed/`. Their output is useful for current-data research, and is never ingested as historical availability by strict mode. Re-running a historical target with latest data is a retrospective scenario, not a PIT forecast.
 
-## Latest data path
-- Pull current snapshots via FRED API (`make fetch-latest`).
-- Process snapshots into `data/processed/` (`make process-latest`).
-- Use processed latest snapshots for one-shot forecast publication (`make latest-forecast-processed`).
-
-## Sources
-- Historical vintages: <https://www.stlouisfed.org/research/economists/mccracken/fred-databases>
-- FRED database transform/outlier code zip: <https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/fred-databases_code.zip?sc_lang=en&hash=82A2EEE1EF3498C0820EB2212531D895>
-- `fbi` package reference: <https://github.com/cykbennie/fbi>
-- FRED API: <https://api.stlouisfed.org/fred>
+FRED transform codes 1–7 use levels, differences, log levels/differences and changes in proportional growth. Nonpositive log inputs become missing. The strict benchmark has no COVID dummies, outlier deletion, forward-looking interpolation or backfill. Any future extension needs explicit training-window fit boundaries and adversarial revision tests.

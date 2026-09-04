@@ -1,5 +1,7 @@
 # Models
 
+> This is the exploratory model catalog. Only the five models in `pit_benchmark.py` are admitted by the strict PIT benchmark. External panel loading, pretrained training-data cutoff, COVID interventions, model-specific fallbacks and ex-post ensemble choice remain uncertified; see [AUDIT.md](../AUDIT.md).
+
 This file documents the model registry used by evaluation (`scripts/run_eval_unprocessed.py`, `scripts/run_eval_processed.py`) and realtime OOS (`scripts/run_realtime_oos.py`).
 
 ## Registry highlights

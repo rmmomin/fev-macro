@@ -70,6 +70,8 @@ def parse_args() -> argparse.Namespace:
             "dataset with ALFRED q/q SAAR KPI columns and supporting ALFRED levels."
         )
     )
+    parser.add_argument("--release-calendar", help="CSV with quarter, stage, release_date, source_url")
+    parser.add_argument("--strict-pit", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--series", default="GDPC1", help="ALFRED series ID (default: GDPC1).")
     parser.add_argument(
         "--output_csv",
@@ -618,7 +620,15 @@ def build_release_dataset(
     series: str,
     qd_panel: pd.DataFrame | None = None,
     vintage_select: str = "next",
+    release_calendar: pd.DataFrame | None = None,
+    strict_pit: bool = True,
 ) -> pd.DataFrame:
+    if strict_pit and release_calendar is None:
+        raise ValueError("A sourced BEA release calendar is required to label first/second/third releases")
+    if release_calendar is not None:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+        from fev_macro.pit_benchmark import validate_release_calendar
+        release_calendar = validate_release_calendar(release_calendar)
     vintage_cols: list[str] = []
     vintage_ts: list[pd.Timestamp] = []
 
@@ -655,19 +665,25 @@ def build_release_dataset(
         if valid_idx.size == 0:
             continue
 
-        i1 = int(valid_idx[0])
-        first_val[i] = row[i1]
-        first_date[i] = np.datetime64(vintage_ts[i1])
-
-        if valid_idx.size >= 2:
-            i2 = int(valid_idx[1])
-            second_val[i] = row[i2]
-            second_date[i] = np.datetime64(vintage_ts[i2])
-
-        if valid_idx.size >= 3:
-            i3 = int(valid_idx[2])
-            third_val[i] = row[i3]
-            third_date[i] = np.datetime64(vintage_ts[i3])
+        if release_calendar is None:
+            chosen = list(valid_idx[:3])
+        else:
+            quarter = pd.Period(obs.iloc[i], freq="Q-DEC")
+            cal = release_calendar.loc[release_calendar.quarter == quarter].set_index("stage")
+            chosen = []
+            for stage in STAGES:
+                if stage not in cal.index:
+                    chosen.append(None)
+                    continue
+                d = pd.Timestamp(cal.loc[stage, "release_date"])
+                # Wide snapshots on the exact scheduled day are required; a
+                # later vintage is not an estimate released on that day.
+                chosen.append(vintage_ts.index(d) if d in vintage_ts else None)
+        for stage_idx, (vals, dates) in enumerate(((first_val, first_date), (second_val, second_date),
+                                                 (third_val, third_date))):
+            idx = chosen[stage_idx] if stage_idx < len(chosen) else None
+            if idx is not None:
+                vals[i], dates[i] = row[idx], np.datetime64(vintage_ts[idx])
 
         ilast = int(valid_idx[-1])
         latest_val[i] = row[ilast]
@@ -892,6 +908,8 @@ def validate_release_table(
 
 def main() -> int:
     args = parse_args()
+    if args.strict_pit and not args.release_calendar:
+        raise ValueError("--release-calendar is required; vintage order is not a BEA release calendar")
     series = args.series.upper()
 
     out_csv = Path(args.output_csv).expanduser().resolve()
@@ -935,6 +953,8 @@ def main() -> int:
         return 2
 
     releases = build_release_dataset(
+        release_calendar=pd.read_csv(args.release_calendar) if args.release_calendar else None,
+        strict_pit=args.strict_pit,
         wide=wide,
         series=series,
         qd_panel=qd_panel,

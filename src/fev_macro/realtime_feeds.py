@@ -75,6 +75,8 @@ def train_df_to_datasets(
         raise ValueError("No non-missing target in train_df.")
 
     q_hist = q_all[mask]
+    if not q_hist.equals(pd.period_range(q_hist.min(), q_hist.max(), freq="Q-DEC")):
+        raise ValueError("Internal GDP gaps cannot be compressed into consecutive quarters")
     y_hist = y_all[mask].to_numpy(dtype=float)
     past_ts = [period.start_time for period in q_hist]
 
@@ -84,7 +86,7 @@ def train_df_to_datasets(
         target_col: y_hist.tolist(),
     }
     for col in covariate_cols:
-        vals = pd.to_numeric(df.loc[mask, col], errors="coerce").ffill().bfill().fillna(0.0).to_numpy(dtype=float)
+        vals = pd.to_numeric(df.loc[mask, col], errors="coerce").ffill().fillna(0.0).to_numpy(dtype=float)
         past_row[col] = vals.tolist()
 
     last_q = q_hist[-1]
@@ -92,7 +94,7 @@ def train_df_to_datasets(
     future_ts = [period.start_time for period in fut_q]
     future_row: dict[str, object] = {"id": str(id_value), "timestamp": future_ts}
     for col in covariate_cols:
-        hist_cov = pd.to_numeric(df.loc[mask, col], errors="coerce").ffill().bfill().fillna(0.0)
+        hist_cov = pd.to_numeric(df.loc[mask, col], errors="coerce").ffill().fillna(0.0)
         last_val = float(hist_cov.iloc[-1]) if len(hist_cov) else 0.0
         all_cov = pd.to_numeric(df[col], errors="coerce")
         cov_map = pd.Series(all_cov.to_numpy(dtype=float), index=q_all).groupby(level=0).last()

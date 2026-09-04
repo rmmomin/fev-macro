@@ -91,11 +91,9 @@ def _append_covid_dummies(frame: pd.DataFrame, timestamp_col: str = "timestamp")
 def discover_historical_qd_vintage_files(historical_qd_dir: str | Path) -> dict[pd.Period, Path]:
     """Discover historical FRED-QD vintage files keyed by monthly vintage period."""
     preferred = Path(historical_qd_dir).expanduser()
-    root = preferred.resolve() if preferred.exists() else None
-    if root is None:
-        root = _autodiscover_historical_qd_dir(preferred)
-    if root is None:
+    if not preferred.exists():
         raise FileNotFoundError(f"Historical FRED-QD directory does not exist: {preferred.resolve()}")
+    root = preferred.resolve()
 
     if not root.exists():
         raise FileNotFoundError(f"Historical FRED-QD directory does not exist: {root}")
@@ -464,7 +462,7 @@ class HistoricalQuarterlyVintageProvider:
         return f"{self.earliest_vintage}..{self.latest_vintage}"
 
     def select_vintage_period(self, cutoff_timestamp: pd.Timestamp, allow_fallback: bool | None = None) -> pd.Period | None:
-        """Pick latest monthly vintage period <= cutoff month."""
+        """Conservative month-label approximation; not proof of a release date."""
         cutoff_period = pd.Period(pd.Timestamp(cutoff_timestamp), freq="M")
         if cutoff_period in self._selection_cache:
             cached = self._selection_cache[cutoff_period]
@@ -472,7 +470,7 @@ class HistoricalQuarterlyVintageProvider:
                 return cached
 
         allow_fallback = self.fallback_to_earliest if allow_fallback is None else bool(allow_fallback)
-        eligible = [p for p in self.vintage_periods if p <= cutoff_period]
+        eligible = [p for p in self.vintage_periods if p < cutoff_period]
         if eligible:
             selected = eligible[-1]
             self._selection_cache[cutoff_period] = selected
@@ -572,9 +570,10 @@ class HistoricalQuarterlyVintageProvider:
             vintage_hist = vintage_hist.sort_values("timestamp").reset_index(drop=True)
             vintage_indexed = vintage_hist.set_index("timestamp", drop=True)
 
-            aligned_target = pd.to_numeric(vintage_indexed.reindex(actual_ts)["target"], errors="coerce")
-            fallback_target = _series_like_to_numeric(rec.get(target_col), expected_len=len(ts_reindexed))
-            target_values = np.where(aligned_target.notna(), aligned_target, fallback_target).astype(float)
+            alignment_ts = pd.PeriodIndex(actual_ts, freq="Q-DEC").to_timestamp(how="start")
+            aligned_target = pd.to_numeric(vintage_indexed.reindex(alignment_ts)["target"], errors="coerce")
+            # A missing vintage target is unknown; release truth is never training data.
+            target_values = aligned_target.to_numpy(dtype=float)
 
             row: dict[str, Any] = {
                 id_col: rec.get(id_col, "__single_series__"),
@@ -583,12 +582,11 @@ class HistoricalQuarterlyVintageProvider:
             }
 
             for cov in required_covars:
-                fallback_cov = _series_like_to_numeric(rec.get(cov), expected_len=len(ts_reindexed))
                 if cov in vintage_indexed.columns:
-                    from_vintage = pd.to_numeric(vintage_indexed.reindex(actual_ts)[cov], errors="coerce")
-                    cov_values = np.where(from_vintage.notna(), from_vintage, fallback_cov)
+                    from_vintage = pd.to_numeric(vintage_indexed.reindex(alignment_ts)[cov], errors="coerce")
+                    cov_values = from_vintage.to_numpy(dtype=float)
                 else:
-                    cov_values = fallback_cov.to_numpy(dtype=float)
+                    cov_values = np.full(len(ts_reindexed), np.nan)
 
                 cov_series = _impute_covariate_series(
                     pd.Series(cov_values, dtype=float),
@@ -650,6 +648,11 @@ class HistoricalQuarterlyVintageProvider:
         if self.exclude_years_list:
             target_df = exclude_years(target_df, years=self.exclude_years_list)
 
+        # FRED-QD files can label a quarter by its final month (e.g. March 1),
+        # whereas release scaffolds use quarter starts. Align economic periods.
+        target_df["timestamp"] = pd.to_datetime(target_df["timestamp"]).dt.to_period("Q-DEC").dt.to_timestamp()
+        if target_df["timestamp"].duplicated().any():
+            raise ValueError("Multiple GDP observations per quarter in historical vintage")
         target_df = target_df.sort_values("timestamp").reset_index(drop=True)
         self._cache[vintage_period] = target_df
         return target_df
@@ -1175,33 +1178,6 @@ def _extract_past_cutoff_timestamp(past_data: Dataset, task: Any) -> pd.Timestam
     return extract_past_cutoff_timestamp(past_data=past_data, task=task)
 
 
-def _autodiscover_historical_qd_dir(preferred: Path) -> Path | None:
-    search_roots: list[Path] = []
-    if preferred.parent.exists():
-        search_roots.append(preferred.parent.resolve())
-
-    default_root = Path("data/historical").expanduser().resolve()
-    if default_root.exists() and default_root not in search_roots:
-        search_roots.append(default_root)
-
-    for root in search_roots:
-        files = sorted(root.rglob("FRED-QD_*.csv"))
-        if not files:
-            files = sorted(root.rglob("fred-qd_*.csv"))
-        if not files:
-            continue
-
-        parent_counts: dict[Path, int] = {}
-        for path in files:
-            parent = path.parent.resolve()
-            parent_counts[parent] = parent_counts.get(parent, 0) + 1
-
-        if parent_counts:
-            return max(parent_counts.items(), key=lambda kv: kv[1])[0]
-
-    return None
-
-
 def _parse_fred_qd_vintage_period(filename: str) -> pd.Period | None:
     match = FRED_QD_VINTAGE_PATTERN.search(filename)
     if not match:
@@ -1664,9 +1640,9 @@ def _impute_covariate_series(
     if mode == "processed":
         # TODO: move processed-mode imputation to model adapters (e.g., train-window median)
         # so dataset construction can preserve raw missingness end-to-end.
-        return s.ffill().bfill()
+        return s.ffill()
 
-    return s.ffill().bfill()
+    return s.ffill()
 
 
 def _series_like_to_numeric(value: Any, expected_len: int) -> pd.Series:

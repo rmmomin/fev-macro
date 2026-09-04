@@ -1,5 +1,7 @@
 # BoE Forecast Evaluation Workflow
 
+> Audit status: this optional legacy export/evaluation workflow is not PIT-certified. Generated BoE baselines and repeated-target DM tests have not been validated against the strict information-set contract. Use strict `paired_metrics` / `paired_dm` with their documented sample restrictions; see [AUDIT.md](../AUDIT.md).
+
 This project includes optional adapters for the Bank of England `forecast_evaluation` package.
 
 Install optional dependencies:

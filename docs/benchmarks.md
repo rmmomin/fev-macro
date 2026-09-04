@@ -1,22 +1,7 @@
 # Benchmarks
 
-## Standard runs
-```bash
-make eval-unprocessed-standard
-make eval-processed-standard
-```
+Use `scripts/run_pit_backtest.py` for the strict benchmark. Its supported models, origin convention and fixtures are described in the [README](../README.md) and [protocol](realtime_protocol.md). The audited four-quarter smoke results are in [AUDIT.md](../AUDIT.md); they do not establish model superiority.
 
-## Profile defaults
-- `smoke`: `num_windows=10`, `horizons={1,4}`, models `{naive_last, drift, auto_arima}`
-- `standard`:
-  - unprocessed LL: `num_windows=60`, `horizons={1,2,4}`, excludes `chronos2` and ensemble models
-  - processed G (`saar_growth`, `alfred_qoq_saar` truth, first release by default): `num_windows=40`, `horizons={1,2,4}`, excludes `chronos2` and ensemble models
-- `full`: full/default long-run profile
+The former `make eval-*-standard` and `make realtime-oos-processed` workflows use archive month labels and broad research models. They now refuse execution under their default strict policy. Direct CLI use with `--no-strict-pit` is an explicit exploratory opt-in.
 
-## Realtime OOS
-Leaderboard-driven processed realtime run:
-```bash
-make realtime-oos-processed
-```
-
-This reads `results/processed_standard/leaderboard.csv`, selects models above the skill threshold, persists the selection JSON, and appends posthoc top-3/top-5 growth-space ensembles.
+In particular, leaderboard skill thresholding and selecting top-three/top-five ensemble members from results over the evaluated periods cause ex-post selection bias. Saving a selection JSON does not fix this. Use a separately held-out design period or reconstruct nested selection at each origin, using only losses whose releases were already known. Neither is implemented for the legacy leaderboard path, so it is not certified.

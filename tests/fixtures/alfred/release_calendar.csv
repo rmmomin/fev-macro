@@ -1,0 +1,13 @@
+quarter,stage,release_date,expected_saar,source_url
+2019Q1,first,2019-04-26,3.2,https://www.bea.gov/news/2019/gross-domestic-product-1st-quarter-2019-advance-estimate
+2019Q1,second,2019-05-30,3.1,https://www.bea.gov/news/blog/2019-05-30/gdp-increases-first-quarter
+2019Q1,third,2019-06-27,3.1,https://www.bea.gov/news/blog/2019-06-27/gdp-increases-first-quarter
+2019Q2,first,2019-07-26,2.1,https://www.bea.gov/news/2019/gross-domestic-product-2nd-quarter-2019-advance-estimate-and-annual-update
+2019Q2,second,2019-08-29,2.0,https://www.bea.gov/news/blog/2019-08-29/gdp-increases-second-quarter
+2019Q2,third,2019-09-26,2.0,https://www.bea.gov/news/blog/2019-09-26/gdp-increases-second-quarter
+2019Q3,first,2019-10-30,1.9,https://www.bea.gov/news/2019/gross-domestic-product-3rd-quarter-2019-advance-estimate
+2019Q3,second,2019-11-27,2.1,https://www.bea.gov/news/blog/2019-11-27/gdp-increases-third-quarter
+2019Q3,third,2019-12-20,2.1,https://www.bea.gov/news/blog/2019-12-20/gdp-increases-third-quarter
+2019Q4,first,2020-01-30,2.1,https://www.bea.gov/news/2020/gross-domestic-product-fourth-quarter-and-year-2019-advance-estimate
+2019Q4,second,2020-02-27,2.1,https://www.bea.gov/news/blog/2020-02-27/gdp-increases-fourth-quarter
+2019Q4,third,2020-03-26,2.1,https://www.bea.gov/news/blog/2020-03-26/gdp-increases-fourth-quarter

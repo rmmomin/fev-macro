@@ -63,3 +63,11 @@ eval-unprocessed-full:
 
 eval-processed-full:
 	$(PY) scripts/run_eval_processed.py --profile full --results_dir results/processed_full
+
+# Strict smoke: use a new database, or omit --fixture-dir on subsequent runs.
+.PHONY: test-pit pit-smoke
+PIT_DB ?= data/realtime/pit_smoke.duckdb
+test-pit:
+	$(PY) -m pytest tests/test_pit_contract.py -q
+pit-smoke:
+	$(PY) scripts/run_pit_backtest.py --db $(PIT_DB) --fixture-dir tests/fixtures/alfred --origins tests/fixtures/alfred/origins.csv --release-calendar tests/fixtures/alfred/release_calendar.csv --series-specs tests/fixtures/alfred/series_specs.json --models naive_last last_growth mean_growth ar4 bridge_ridge --covariates UNRATE --out results/pit_smoke

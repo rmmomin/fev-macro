@@ -25,9 +25,9 @@ RELEASE_STAGE_TO_COL = {
     "third": "third_release",
 }
 RELEASE_STAGE_TO_REALTIME_SAAR_COL = {
-    "first": "qoq_saar_growth_realtime_first_pct",
-    "second": "qoq_saar_growth_realtime_second_pct",
-    "third": "qoq_saar_growth_realtime_third_pct",
+    "first": "qoq_saar_growth_alfred_first_pct",
+    "second": "qoq_saar_growth_alfred_second_pct",
+    "third": "qoq_saar_growth_alfred_third_pct",
 }
 
 PREFERRED_MD_COVARIATES: tuple[str, ...] = (
@@ -2063,7 +2063,11 @@ def run_backtest(
     qd_panel_path: str | Path | None = None,
     mixed_freq_excluded_years: Sequence[int] | None = None,
     asof_provider: AsofVintageProvider | None = None,
+    strict_pit: bool = True,
 ) -> pd.DataFrame:
+    if strict_pit:
+        raise ValueError("Legacy run_backtest cannot establish PIT origins/model inputs; use run_pit_backtest "
+                         "or explicitly set strict_pit=False for exploratory results.")
     if origin_schedule not in {"quarterly", "monthly"}:
         raise ValueError("origin_schedule must be one of {'quarterly', 'monthly'}")
 
@@ -2204,7 +2208,7 @@ def run_backtest(
                 raise ValueError(f"Model '{model.name}' produced non-finite forecasts.")
 
             for h in horizon_list:
-                target_quarter = observed_quarter + h
+                target_quarter = training_max_quarter + h
                 if min_target_period is not None and target_quarter < min_target_period:
                     continue
                 if training_max_quarter >= target_quarter:
@@ -2246,6 +2250,7 @@ def run_backtest(
                             "training_min_quarter": str(training_min_quarter),
                             "training_max_quarter": str(training_max_quarter),
                             "covariate_cutoff_quarter": str(covariate_cutoff),
+                            "pit_validated": False,
                             "asof_db_used": bool(asof_provider is not None),
                             "asof_snapshot_used": bool(asof_meta.get("used_snapshot", False)),
                             "target_quarter": str(target_quarter),

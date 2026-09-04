@@ -1,125 +1,76 @@
 # fev-macro
 
-## Overview
-`fev-macro` is a reproducible US real-GDP forecasting benchmark built on `fev` rolling-window evaluation. It combines historical FRED vintage panels, release-consistent GDP truth from ALFRED, and both classical and factor-style models. The repo is organized around one authoritative pipeline for panel building, evaluation, realtime OOS scoring, and latest-vintage 2025Q4 forecasting.
+US real-GDP forecasting research, with a small strict point-in-time benchmark and a broader exploratory model collection.
 
-## What this repo does
-1. Build vintage panels for FRED-QD and FRED-MD historical vintages.
-2. Build processed panels using FRED transform codes + MD outlier/trimming semantics (code zip + fbi).
-3. Build GDP release truth table from ALFRED and compute release-vintage q/q and q/q SAAR growth for first/second/third releases.
-4. Run fev evaluation for both processed and unprocessed panels, with different target objectives (LL vs G) and release-truth mappings.
-5. Produce a 2025Q4 one-shot forecast using latest FRED API pulls and processed-mode top models.
+**The previous “vintage-correct by default” claim was not supported.** The audit found current-FRED history backdated to observation dates, missing historical values filled from later panels, ambiguous archive dates, and ex-post model selection. These outputs are not validated historical forecasts. See [AUDIT.md](AUDIT.md) for findings, fixes, tests, and remaining limits.
 
-## Quickstart
-```bash
-make setup
-make download-historical
-make panel-qd panel-md
-make panel-qd-processed panel-md-processed
-make build-gdp-releases
-make eval-unprocessed-standard
-make eval-processed-standard
-```
+## Strict benchmark
 
-## Modes: processed vs unprocessed
-| Mode | Covariates | Training objective | KPI for comparison |
-|---|---|---|---|
-| `unprocessed` | Raw vintage covariates | `log_level` (LL) | q/q SAAR real GDP growth vs ALFRED release truth |
-| `processed` | Transform-code + MD outlier/trimming processed covariates | `saar_growth` (G) | q/q SAAR real GDP growth vs BEA-verified ALFRED first-vintage truth (`qoq_saar_growth_alfred_first_pct`) |
+A forecast dated `D` uses ALFRED vintages dated **before D**, interpreting dates in America/New_York. Same-day releases are excluded even for an afternoon forecast because ALFRED has no intraday availability timestamps. Observation dates identify the period measured, not when its value became known.
 
-Details: [`docs/data_processing.md`](docs/data_processing.md)
-
-## Models included
-Core baselines and multivariate models include `naive_last`, `mean`, `drift`, `ar4`, `auto_arima`, `auto_ets`, `theta`, `local_trend_ssm`, `random_forest`, `xgboost`, `factor_pca_qd`, `mixed_freq_dfm_md`, `bvar_minnesota_8`, `bvar_minnesota_20`, `bvar_minnesota_growth_8`, `bvar_minnesota_growth_20`, `chronos2`, and LSTM variants `lstm_univariate` / `lstm_multivariate` (plus optional ensemble variants).
-
-LSTM variants require PyTorch (`torch>=2.2.0`). They are included in `--profile full`, and remain opt-in for other model/profile selections.
+The strict path reads verified ALFRED API intervals directly. It never reads latest-data CSVs, archive panels, or leaderboards. GDP release truth is loaded after forecasts are made, using a sourced BEA release calendar and same-release-vintage numerator and denominator.
 
 ```bash
-python scripts/run_eval_processed.py --models lstm_univariate lstm_multivariate --num_windows 20
+# Python 3.11; minimal pinned dependencies, no neural-model stack needed
+python3 -m venv .venv-pit
+.venv-pit/bin/python -m pip install -r requirements-pit.txt
+
+# Offline historical smoke backtest from captured real API responses.
+# Use a new database path. On repeat runs, omit --fixture-dir.
+.venv-pit/bin/python scripts/run_pit_backtest.py \
+  --db data/realtime/pit_smoke.duckdb \
+  --fixture-dir tests/fixtures/alfred \
+  --origins tests/fixtures/alfred/origins.csv \
+  --release-calendar tests/fixtures/alfred/release_calendar.csv \
+  --series-specs tests/fixtures/alfred/series_specs.json \
+  --models naive_last last_growth mean_growth ar4 bridge_ridge \
+  --covariates UNRATE --out results/pit_smoke
+
+.venv-pit/bin/python -m pytest tests/test_pit_contract.py -q
 ```
 
-Full model catalog: [`docs/models.md`](docs/models.md)
+Outputs include `forecasts.csv`, `truth.csv`, `scored.csv`, paired `metrics.csv`, per-origin `audit.json`, portable `api_responses.json`, and `manifest.json`. Forecast rows link to the audit using a content hash. Stored API responses retain request bounds, values, interval endpoints, retrieval time, and provenance IDs without API keys.
 
-## Real-time evaluation policy
-**By default, every rolling window trains on an as-of vintage (vintage-correct). Snapshot evaluation is blocked unless you explicitly pass `--allow_snapshot_eval`.** For processed `run_eval`, release truth defaults to BEA-verified ALFRED q/q SAAR first-vintage growth from `data/panels/gdpc1_releases_first_second_third.csv` (`qoq_saar_growth_alfred_first_pct`) via `--eval_release_metric alfred_qoq_saar --eval_release_stages first --target_transform saar_growth`. ALFRED q/q non-SAAR truth remains available via `--eval_release_metric alfred_qoq --target_transform qoq_growth`, and realtime SAAR truth remains available via `--eval_release_metric realtime_qoq_saar --target_transform saar_growth`.
-
-## As-of database (ragged-edge realtime)
-`fev-macro` now supports a bitemporal as-of store (`DuckDB`) for heterogeneous data arrivals/revisions.
-
-1. Set API key:
-```bash
-export FRED_API_KEY="..."
-```
-
-2. First backfill + update:
-```bash
-python scripts/sync_alfred_asof_store.py \
-  --db data/realtime/asof.duckdb \
-  --universe both \
-  --backfill_missing \
-  --observation_start 1959-01-01
-```
-
-3. Incremental refresh (daily/hourly):
-```bash
-python scripts/sync_alfred_asof_store.py \
-  --db data/realtime/asof.duckdb \
-  --universe both \
-  --no-backfill_missing \
-  --lookback_days 7
-```
-
-4. Query an as-of snapshot:
-```bash
-python scripts/example_query_asof.py \
-  --db data/realtime/asof.duckdb \
-  --asof 2019-05-01 \
-  --series GDPC1,CPIAUCSL,UNRATE \
-  --obs_start 1990-01-01 \
-  --out data/realtime/snapshot_2019-05-01.csv
-```
-
-5. Use as-of snapshots inside realtime OOS:
-```bash
-python scripts/run_realtime_oos.py \
-  --mode processed \
-  --asof_db data/realtime/asof.duckdb \
-  --asof_universe both
-```
-
-## Latest-vintage one-shot forecast + 2025Q4 comparison
-```bash
-make fetch-latest && make process-latest && make latest-forecast-processed
-make plot-2025q4
-```
-
-## Optional BoE evaluation workflow
-Use BoE-style schema exports, DM tests, rolling/fluctuation diagnostics, and plots:
+Supported strict models are a constant-level baseline, last/mean log-growth baselines, fixed AR(4) on log growth, and a fixed ridge bridge with four GDP growth lags and declared monthly/quarterly features. Features are transformed at their native frequency, then averaged over released observations; counts and missing indicators expose partial quarters. Imputation/scaling are fitted on training rows. This is a simple bridge, not a dynamic mixed-frequency state-space model.
 
 ```bash
-pip install -r requirements.txt
+# Verified live backfill. Existing legacy databases must be rebuilt into a NEW file.
+export FRED_API_KEY="..."  # alternatively use the ignored .env file
+.venv-pit/bin/python scripts/sync_alfred_asof_store.py \
+  --db data/realtime/pit.duckdb --series GDPC1 UNRATE \
+  --observation_start 2005-01-01
 
-python -m fev_macro.boe export --predictions_csv results/realtime_oos/predictions.csv --release_table_csv data/panels/gdpc1_releases_first_second_third.csv --out_dir results/boe_export --truth first --variable GDPC1 --metric levels --forecast_value_col y_hat_level
-python -m fev_macro.boe eval --forecasts_csv results/boe_export/boe_forecasts.csv --outturns_csv results/boe_export/boe_outturns.csv --k 0 --benchmark_model naive_last --out_dir results/boe_results
-python -m fev_macro.boe plots --forecasts_csv results/boe_export/boe_forecasts.csv --outturns_csv results/boe_export/boe_outturns.csv --variable GDPC1 --source naive_last --metric levels --frequency Q --k 0 --horizon 0 --ma_window 4 --out_dir results/boe_plots
+# Refresh/replay the overlap; failed series return nonzero and appear in the report.
+.venv-pit/bin/python scripts/sync_alfred_asof_store.py \
+  --db data/realtime/pit.duckdb --series GDPC1 UNRATE --no-backfill_missing
+
+# Deliberate network validation / fixture refresh
+FEV_LIVE_ALFRED=1 .venv-pit/bin/python -m pytest tests/test_pit_contract.py -m integration -q
+.venv-pit/bin/python scripts/capture_alfred_fixtures.py
 ```
 
-`k=0` corresponds to first-release truth under the default export conventions.
-More details: [`docs/boe_evaluation.md`](docs/boe_evaluation.md)
+Supply your own fixed origin CSV (`origin_date,target_quarter`), series specification JSON, and release calendar (`quarter,stage,release_date,source_url`, optional `expected_saar`) for other periods. The checked calendar covers only 2019. Keep design/tuning periods separate from evaluation periods; this code cannot prove that a human chose a model before seeing its test results.
 
-## Outputs + repo layout
-- `data/historical/`: downloaded FRED vintage archives and extracted CSVs
-- `data/panels/`: generated vintage panels and GDP release truth table
-- `data/latest/`, `data/processed/`: latest API pulls and processed latest snapshots
-- `results/`: evaluation outputs, leaderboards, realtime OOS metrics, and forecast plots
-- `scripts/`: core pipeline entrypoints
-- `scripts/dev/`: non-core development utilities
-- `docs/`: deeper protocol/model/data notes
+Definitions and limitations: [point-in-time protocol](docs/realtime_protocol.md). Data transformations: [processing notes](docs/data_processing.md).
 
-## References
-- FRED databases historical vintages: <https://www.stlouisfed.org/research/economists/mccracken/fred-databases>
-- FRED databases code zip (transform codes + trimming/outliers): <https://www.stlouisfed.org/-/media/project/frbstl/stlouisfed/research/fred-md/fred-databases_code.zip?sc_lang=en&hash=82A2EEE1EF3498C0820EB2212531D895>
-- fbi library: <https://github.com/cykbennie/fbi>
-- ALFRED: <https://alfred.stlouisfed.org>
-- FRED API: <https://api.stlouisfed.org/fred>
-- fev (Forecast EValuation library): <https://github.com/autogluon/fev>
+## Exploratory workflows
+
+The historical MD/QD panel builders, `fev` model catalog, BoE exports, and latest-vintage scripts remain available for research. Legacy historical evaluation now refuses to run by default; `--no-strict-pit` explicitly opts into uncertified results. Selecting models or ensemble members from a leaderboard evaluated over the same periods is ex-post selection, not independent out-of-sample evidence.
+
+```bash
+# Broader optional model dependencies
+python -m pip install -r requirements.txt
+python -m pytest -q
+
+# Explicitly exploratory; see AUDIT.md before interpreting scores
+python scripts/run_eval_processed.py --profile smoke --no-strict-pit
+python scripts/run_realtime_oos.py --mode processed --no-strict-pit
+```
+
+Latest-vintage 2025Q4 artifacts are retrospective if generated after its releases. They cannot be relabelled PIT forecasts. Existing generated results were left intact and are superseded as evidence by the audit.
+
+- `src/fev_macro/pit*.py`, `asof_store.py`, `asof_provider.py`: strict contract and benchmark
+- `tests/fixtures/alfred/`: captured official responses, explicit origins and BEA release calendar
+- `scripts/`: ingestion, strict backtest, exploratory evaluation, and data utilities
+- `data/`, `results/`: local data and generated artifacts (mostly ignored by Git)
+- [Research model catalog](docs/models.md), [benchmark notes](docs/benchmarks.md), [BoE notes](docs/boe_evaluation.md)

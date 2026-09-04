@@ -1,0 +1,25 @@
+{
+  "endpoint": "https://api.stlouisfed.org/fred/series/vintagedates",
+  "params": {
+    "series_id": "GDPC1",
+    "realtime_start": "2019-04-01",
+    "realtime_end": "2019-06-30",
+    "limit": 10000,
+    "offset": 0
+  },
+  "retrieved_at": "2026-09-04T23:08:46.831868+00:00",
+  "response": {
+    "realtime_start": "2019-04-01",
+    "realtime_end": "2019-06-30",
+    "order_by": "vintage_date",
+    "sort_order": "asc",
+    "count": 3,
+    "offset": 0,
+    "limit": 10000,
+    "vintage_dates": [
+      "2019-04-26",
+      "2019-05-30",
+      "2019-06-27"
+    ]
+  }
+}

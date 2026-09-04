@@ -20,7 +20,7 @@ def test_asof_provider_adapts_train_df_from_snapshot(tmp_path) -> None:
 
     pytest.importorskip("duckdb")
     db_path = tmp_path / "asof.duckdb"
-    store = AsofStore(db_path=db_path)
+    store = AsofStore(db_path=db_path, strict_pit=False)
     try:
         versions = pd.DataFrame(
             [
@@ -36,6 +36,7 @@ def test_asof_provider_adapts_train_df_from_snapshot(tmp_path) -> None:
 
     provider = AsofVintageProvider(
         db_path=db_path,
+        strict_pit=False,
         covariate_mode="unprocessed",
         universe="both",
     )

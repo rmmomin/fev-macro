@@ -571,6 +571,8 @@ def main() -> int:
     out_df.to_csv(output_path, index=False)
 
     final = out_df.loc[out_df["target_quarter"] == str(target_q)].copy()
+    final["pit_validated"] = False
+    final["information_policy"] = "latest-vintage scenario, not a historical PIT forecast"
     final = final.sort_values("g_hat_saar", ascending=True, na_position="last")
 
     print(

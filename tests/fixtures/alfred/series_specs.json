@@ -1,0 +1,9 @@
+{
+  "GDPC1": {
+    "frequency": "Q"
+  },
+  "UNRATE": {
+    "frequency": "M",
+    "tcode": 1
+  }
+}

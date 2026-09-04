@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+import json
+
 import pandas as pd
+
+from .pit import PITError, alfred_rows, content_hash, information_date
 
 
 def _naive_timestamp(value: object) -> pd.Timestamp:
@@ -29,9 +33,10 @@ def _normalize_datetime_series(values: pd.Series) -> pd.Series:
 
 @dataclass
 class AsofStore:
-    """Append-only DuckDB store for versioned observations."""
+    """Versioned DuckDB observations with retained API responses and PIT checks."""
 
     db_path: str | Path
+    strict_pit: bool = True
 
     def __post_init__(self) -> None:
         try:
@@ -108,8 +113,36 @@ class AsofStore:
             """
         )
 
+        self._con.execute("ALTER TABLE asof_observations ADD COLUMN IF NOT EXISTS realtime_end VARCHAR")
+        self._con.execute("ALTER TABLE asof_observations ADD COLUMN IF NOT EXISTS provenance_id VARCHAR")
+        self._con.execute("""
+            CREATE TABLE IF NOT EXISTS asof_api_responses (
+                provenance_id VARCHAR PRIMARY KEY, request_json VARCHAR NOT NULL,
+                response_json VARCHAR NOT NULL, retrieved_at VARCHAR NOT NULL, endpoint VARCHAR NOT NULL
+            )
+        """)
+
+    def ingest_alfred_response(self, payload: dict, params: dict, *, retrieved_at: str | None = None) -> int:
+        """Keep sanitized request and exact JSON content together with its versions.
+
+        Callers syncing multiple pages must wrap all pages in one transaction.
+        Credentials are never retained. Only validated API interval rows receive
+        the source tag accepted by strict queries.
+        """
+        safe = {k: v for k, v in params.items() if k != "api_key"}
+        rows = alfred_rows(payload, safe)
+        provenance_id = content_hash({"params": safe, "response": payload})
+        self._con.execute(
+            "INSERT INTO asof_api_responses VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            [provenance_id, json.dumps(safe, sort_keys=True), json.dumps(payload, sort_keys=True),
+             retrieved_at or pd.Timestamp.now(tz="UTC").isoformat(),
+             "https://api.stlouisfed.org/fred/series/observations"],
+        )
+        rows["provenance_id"] = provenance_id
+        return self.ingest_versions(rows, source="alfred_api_v2")
+
     def ingest_versions(self, df_versions: pd.DataFrame, *, source: str | None = None) -> int:
-        """Insert row versions; duplicate PK rows are ignored."""
+        """Insert versions; replay interval bounds, reject conflicting values, count inserts."""
         if df_versions is None or df_versions.empty:
             return 0
 
@@ -119,44 +152,51 @@ class AsofStore:
             raise ValueError(f"df_versions missing required columns: {missing}")
 
         work = df_versions.copy()
+        if work["series_id"].isna().any():
+            raise PITError("Missing series identifier")
         work["series_id"] = work["series_id"].astype(str)
         work["obs_ts"] = _normalize_datetime_series(work["obs_ts"])
         work["asof_ts"] = _normalize_datetime_series(work["asof_ts"])
-        work["value"] = pd.to_numeric(work["value"], errors="coerce")
-        work = work.dropna(subset=["series_id", "obs_ts", "asof_ts"])
-        if work.empty:
-            return 0
-        work["source"] = str(source) if source is not None else None
-        work = (
-            work.drop_duplicates(subset=["series_id", "obs_ts", "asof_ts"], keep="last")
-            .reset_index(drop=True)
-        )
-
-        self._con.register(
-            "incoming_versions",
-            work[["series_id", "obs_ts", "asof_ts", "value", "source"]],
-        )
-        self._con.execute(
-            """
-            INSERT INTO asof_observations(series_id, obs_ts, asof_ts, value, source)
-            SELECT series_id, obs_ts, asof_ts, value, source
-            FROM incoming_versions
-            ON CONFLICT(series_id, obs_ts, asof_ts) DO NOTHING;
-            """
-        )
-        self._con.execute(
-            """
-            INSERT INTO asof_series_state(series_id, max_asof_ts, updated_at)
-            SELECT series_id, MAX(asof_ts) AS max_asof_ts, now()
-            FROM incoming_versions
-            GROUP BY series_id
-            ON CONFLICT(series_id) DO UPDATE SET
-              max_asof_ts = GREATEST(asof_series_state.max_asof_ts, excluded.max_asof_ts),
-              updated_at = now();
-            """
-        )
-        self._con.unregister("incoming_versions")
-        return int(len(work))
+        work["value"] = pd.to_numeric(work["value"], errors="raise")
+        if work[["obs_ts", "asof_ts"]].isna().any().any():
+            raise PITError("Invalid observation or availability timestamp")
+        if work["value"].isin([float("inf"), -float("inf")]).any():
+            raise PITError("Infinite observations are invalid")
+        work["source"] = source
+        for col in ("realtime_end", "provenance_id"):
+            if col not in work:
+                work[col] = None
+        keys = ["series_id", "obs_ts", "asof_ts"]
+        if (work.groupby(keys, dropna=False)["value"].nunique(dropna=False) > 1).any():
+            raise PITError("Conflicting values for the same version")
+        work = work.drop_duplicates(keys)
+        cols = [*keys, "value", "source", "realtime_end", "provenance_id"]
+        self._con.register("incoming_versions", work[cols])
+        try:
+            conflict = self._con.execute("""
+                SELECT COUNT(*) FROM incoming_versions i JOIN asof_observations o
+                USING(series_id, obs_ts, asof_ts)
+                WHERE i.value IS DISTINCT FROM o.value OR i.source IS DISTINCT FROM o.source
+            """).fetchone()[0]
+            if conflict:
+                raise PITError("Conflicting stored version; rebuild legacy databases into a new file")
+            before = self._con.execute("SELECT COUNT(*) FROM asof_observations").fetchone()[0]
+            self._con.execute("""
+                INSERT INTO asof_observations(series_id, obs_ts, asof_ts, value, source, realtime_end, provenance_id)
+                SELECT series_id, obs_ts, asof_ts, value, source, realtime_end, provenance_id FROM incoming_versions
+                ON CONFLICT(series_id, obs_ts, asof_ts) DO UPDATE SET
+                    realtime_end = excluded.realtime_end, provenance_id = excluded.provenance_id
+            """)
+            self._con.execute("""
+                INSERT INTO asof_series_state(series_id, max_asof_ts, updated_at)
+                SELECT series_id, MAX(asof_ts), now() FROM incoming_versions GROUP BY series_id
+                ON CONFLICT(series_id) DO UPDATE SET
+                    max_asof_ts = GREATEST(asof_series_state.max_asof_ts, excluded.max_asof_ts),
+                    updated_at = now()
+            """)
+            return int(self._con.execute("SELECT COUNT(*) FROM asof_observations").fetchone()[0] - before)
+        finally:
+            self._con.unregister("incoming_versions")
 
     def upsert_alias(self, *, variable_name: str, universe: str, series_id: str) -> None:
         self._con.execute(
@@ -261,36 +301,46 @@ class AsofStore:
                 cols.append("asof_used")
             return pd.DataFrame(columns=cols)
 
-        cutoff = _naive_timestamp(asof_ts)
-        where = ["o.asof_ts <= ?"]
-        params: list[object] = [cutoff]
+        cutoff = information_date(asof_ts) if self.strict_pit else _naive_timestamp(asof_ts)
+        where = ["o.asof_ts <= ?", "o.obs_ts <= ?"]
+        params: list[object] = [cutoff, cutoff]
         if obs_start is not None:
             where.append("o.obs_ts >= ?")
             params.append(_naive_timestamp(obs_start))
         if obs_end is not None:
             where.append("o.obs_ts <= ?")
             params.append(_naive_timestamp(obs_end))
-
-        filt = pd.DataFrame({"series_id": series_list})
-        self._con.register("series_filter", filt)
-
-        select_asof_used = ", MAX(o.asof_ts) AS asof_used" if include_asof_used else ""
-        sql = f"""
-        SELECT
-          o.series_id,
-          o.obs_ts,
-          ARG_MAX(o.value, o.asof_ts) AS value
-          {select_asof_used}
-        FROM asof_observations o
-        JOIN series_filter f ON o.series_id = f.series_id
-        WHERE {' AND '.join(where)}
-        GROUP BY o.series_id, o.obs_ts
-        ORDER BY o.obs_ts, o.series_id;
-        """
-        out = self._con.execute(sql, params).df()
-        self._con.unregister("series_filter")
-        if not out.empty:
-            out["obs_ts"] = pd.to_datetime(out["obs_ts"], errors="coerce")
+        self._con.register("series_filter", pd.DataFrame({"series_id": sorted(set(series_list))}))
+        try:
+            if self.strict_pit:
+                bad = self._con.execute("""
+                    SELECT DISTINCT o.series_id FROM asof_observations o
+                    JOIN series_filter f USING(series_id)
+                    LEFT JOIN asof_api_responses p USING(provenance_id)
+                    WHERE o.source IS DISTINCT FROM 'alfred_api_v2'
+                       OR o.realtime_end IS NULL OR p.provenance_id IS NULL
+                """).fetchall()
+                if bad:
+                    raise PITError(f"Unverified/legacy series in strict PIT store: {bad}; re-sync into a new database")
+            # Select the newest ROW, including NULL withdrawals. ARG_MAX(value, date)
+            # skips NULL and can silently resurrect a superseded observation.
+            extra = ", asof_ts AS asof_used, realtime_end, source, provenance_id" if include_asof_used else ""
+            end_filter = "WHERE realtime_end >= ?" if self.strict_pit else ""
+            if self.strict_pit:
+                params.append(cutoff.date().isoformat())
+            out = self._con.execute(f"""
+                WITH ranked AS (
+                    SELECT o.*, ROW_NUMBER() OVER (
+                        PARTITION BY o.series_id, o.obs_ts ORDER BY o.asof_ts DESC
+                    ) AS rn
+                    FROM asof_observations o JOIN series_filter f USING(series_id)
+                    WHERE {' AND '.join(where)}
+                ), latest AS (SELECT * FROM ranked WHERE rn = 1)
+                SELECT series_id, obs_ts, value {extra} FROM latest
+                {end_filter} ORDER BY obs_ts, series_id
+            """, params).df()
+        finally:
+            self._con.unregister("series_filter")
         return out
 
     def snapshot_wide(

@@ -18,7 +18,7 @@ def test_snapshot_long_uses_latest_version_at_or_before_cutoff(tmp_path) -> None
 
     pytest.importorskip("duckdb")
     db_path = tmp_path / "asof.duckdb"
-    store = AsofStore(db_path=db_path)
+    store = AsofStore(db_path=db_path, strict_pit=False)
     try:
         versions = pd.DataFrame(
             [
@@ -55,7 +55,7 @@ def test_ingest_versions_ignores_duplicate_primary_keys(tmp_path) -> None:
 
     pytest.importorskip("duckdb")
     db_path = tmp_path / "asof.duckdb"
-    store = AsofStore(db_path=db_path)
+    store = AsofStore(db_path=db_path, strict_pit=False)
     try:
         batch = pd.DataFrame(
             [
@@ -67,7 +67,7 @@ def test_ingest_versions_ignores_duplicate_primary_keys(tmp_path) -> None:
         assert attempted == 1  # pre-deduped within batch
 
         attempted_again = store.ingest_versions(batch, source="unit_test")
-        assert attempted_again == 1  # attempted row count still reflects pre-deduped input
+        assert attempted_again == 0  # actual inserts, not attempted rows
 
         snap = store.snapshot_long(asof_ts="2021-03-01", series_ids=["UNRATE"])
         assert len(snap) == 1

@@ -93,11 +93,11 @@ def _make_synthetic_release_table() -> pd.DataFrame:
 
     y_prev = df["first_release"].shift(1)
     df["g_true_saar_first"] = [to_saar_growth(c, p) for c, p in zip(df["first_release"], y_prev)]
-    df["qoq_saar_growth_realtime_first_pct"] = df["g_true_saar_first"]
+    df["qoq_saar_growth_alfred_first_pct"] = df["g_true_saar_first"]
     y_prev_second = df["second_release"].shift(1)
     y_prev_third = df["third_release"].shift(1)
-    df["qoq_saar_growth_realtime_second_pct"] = [to_saar_growth(c, p) for c, p in zip(df["second_release"], y_prev_second)]
-    df["qoq_saar_growth_realtime_third_pct"] = [to_saar_growth(c, p) for c, p in zip(df["third_release"], y_prev_third)]
+    df["qoq_saar_growth_alfred_second_pct"] = [to_saar_growth(c, p) for c, p in zip(df["second_release"], y_prev_second)]
+    df["qoq_saar_growth_alfred_third_pct"] = [to_saar_growth(c, p) for c, p in zip(df["third_release"], y_prev_third)]
     return df
 
 
@@ -135,6 +135,7 @@ def test_run_backtest_training_cutoff_before_target() -> None:
     panel = _make_synthetic_vintage_panel(release)
 
     preds = run_backtest(
+        strict_pit=False,  # explicitly exercise legacy exploratory behavior
         models=["naive_last"],
         release_table=release,
         vintage_panel=panel,
@@ -157,6 +158,7 @@ def test_run_backtest_monthly_release_stages_and_buckets() -> None:
     panel = _make_synthetic_vintage_panel(release)
 
     preds = run_backtest(
+        strict_pit=False,  # explicitly exercise legacy exploratory behavior
         models=["naive_last"],
         release_table=release,
         vintage_panel=panel,
@@ -178,6 +180,7 @@ def test_run_backtest_respects_min_target_quarter_filter() -> None:
     panel = _make_synthetic_vintage_panel(release)
 
     preds = run_backtest(
+        strict_pit=False,  # explicitly exercise legacy exploratory behavior
         models=["naive_last"],
         release_table=release,
         vintage_panel=panel,
@@ -194,14 +197,15 @@ def test_run_backtest_respects_min_target_quarter_filter() -> None:
     assert min_target >= pd.Period("2022Q1", freq="Q-DEC")
 
 
-def test_run_backtest_prefers_realtime_saar_truth_columns() -> None:
+def test_run_backtest_prefers_alfred_same_vintage_saar_truth_columns() -> None:
     release = _make_synthetic_release_table()
     panel = _make_synthetic_vintage_panel(release)
 
     # Force a distinctive truth signal that differs from level-derived growth.
-    release.loc[release["quarter"] >= pd.Period("2020Q2", freq="Q-DEC"), "qoq_saar_growth_realtime_first_pct"] = 9.99
+    release.loc[release["quarter"] >= pd.Period("2020Q2", freq="Q-DEC"), "qoq_saar_growth_alfred_first_pct"] = 9.99
 
     preds = run_backtest(
+        strict_pit=False,  # explicitly exercise legacy exploratory behavior
         models=["naive_last"],
         release_table=release,
         vintage_panel=panel,
@@ -224,6 +228,7 @@ def test_run_backtest_supports_growth_target_models() -> None:
     panel = _make_synthetic_vintage_panel(release)
 
     preds = run_backtest(
+        strict_pit=False,  # explicitly exercise legacy exploratory behavior
         models=["naive_last_growth"],
         release_table=release,
         vintage_panel=panel,

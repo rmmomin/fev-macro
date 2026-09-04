@@ -122,6 +122,8 @@ def build_eval_arg_parser(
     default_qd_vintage_panel: str = "data/panels/fred_qd_vintage_panel.parquet",
 ) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--strict-pit", action=argparse.BooleanOptionalAction, default=True,
+                        help="Refuse legacy calendar/model paths; use scripts/run_pit_backtest.py for verified PIT")
     parser.add_argument(
         "--profile",
         type=str,
@@ -200,7 +202,7 @@ def build_eval_arg_parser(
         "--historical_qd_dir",
         type=str,
         default="data/historical/qd/vintages_2018_2026",
-        help="Path to historical FRED-QD vintage CSVs for vintage-correct training windows.",
+        help="Path to historical FRED-QD CSVs for exploratory month-labelled windows.",
     )
     parser.add_argument(
         "--disable_historical_vintages",
@@ -406,6 +408,10 @@ def run_eval_pipeline(
         print("WARNING: All windows will train on a single finalized snapshot.")
         print("WARNING: This introduces revision/look-ahead bias and is NOT a real-time simulation.")
 
+    if bool(getattr(args, "strict_pit", True)):
+        raise ValueError("Strict PIT refuses legacy fev month-label windows. Use scripts/run_pit_backtest.py "
+                         "or --no-strict-pit for explicitly non-PIT exploratory evaluation.")
+    print("WARNING: legacy evaluation is NOT certified point-in-time; see AUDIT.md")
     np.random.seed(int(args.seed))
 
     target_transform = str(getattr(args, "target_transform", "") or default_target_transform)
@@ -821,6 +827,7 @@ def run_eval_pipeline(
         "disable_historical_vintages": disable_historical_vintages,
         "allow_snapshot_eval": allow_snapshot_eval,
         "snapshot_eval": snapshot_eval,
+        "pit_validated": False,
         "provider_source_kind": sorted(provider_source_kinds) if provider_source_kinds else [],
         "qd_panel_path": str(Path(args.qd_vintage_panel).expanduser().resolve()),
         "historical_qd_dir": str(Path(args.historical_qd_dir).expanduser().resolve()),
