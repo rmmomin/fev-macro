@@ -1,13 +1,16 @@
-"""Small, auditable benchmark with an explicit information set at every origin.
+"""Auditable catalog with an explicit information set at every origin.
 
-No archive panels, release truth, pretrained weights, leaderboard selection, or
-implicit calendars are consulted during fitting. Scoring is a separate step.
+No archive panels, scoring releases or stored leaderboards enter fitting.
+Ensembles replay earlier PIT origins; pretrained checkpoints need dated evidence.
 """
 from __future__ import annotations
 
 import json
 import math
 from typing import Sequence
+
+from .pit_models import (CATALOG_MODELS, COVARIATE_MODELS, ENSEMBLES,
+                         ModelData, UnsupportedModel, forecast_model, model_seed)
 
 import numpy as np
 import pandas as pd
@@ -16,7 +19,7 @@ from .asof_provider import AsofVintageProvider
 from .asof_store import AsofStore
 from .pit import PITError, content_hash, information_date
 
-MODELS = ("naive_last", "last_growth", "mean_growth", "ar4", "bridge_ridge")
+MODELS = CATALOG_MODELS
 STAGES = ("first", "second", "third")
 
 
@@ -106,20 +109,57 @@ def _regression_path(g: np.ndarray, steps: int, features: pd.DataFrame | None) -
     return history[-steps:]
 
 
+def _ensemble_validation(provider, origin, target, y, *, candidates, windows, covariates,
+                         min_train, rolling_size, seed):
+    """Rebuild historical validation inputs at THEIR origins, score only known GDP.
+
+    Validation truth is the GDP vintage available at the CURRENT selection origin,
+    not an eventual revision or a claimed first release. Every candidate uses the
+    same quarters. Failure of a candidate fails selection; none is silently dropped.
+    """
+    quarters = y.index[-windows:]
+    if len(quarters) != windows or quarters[0] - 1 not in y.index:
+        raise PITError("Insufficient released GDP for ensemble validation")
+    requests = pd.DataFrame([dict(origin_date=(origin - pd.DateOffset(months=3*(target.ordinal-q.ordinal))).isoformat(),
+                                  target_quarter=str(q)) for q in quarters])
+    if (pd.to_datetime(requests.origin_date) >= origin).any():
+        raise PITError("Ensemble validation origin is not earlier than forecast origin")
+    inner, audits = run_pit_backtest(provider, requests, models=candidates, covariates=covariates,
+                                    min_train=min_train, rolling_size=rolling_size, seed=seed)
+    errors = {}
+    truth = {str(q): growth(float(y.loc[q]), float(y.loc[q-1])) for q in quarters}
+    for name in candidates:
+        sample = inner.loc[inner.model == name].sort_values("target_quarter")
+        if len(sample) != windows or not np.isfinite(sample.g_hat_saar).all():
+            raise PITError("Ensemble requires a complete matched validation sample")
+        errors[name] = float(np.sqrt(np.mean([(r.g_hat_saar - truth[r.target_quarter])**2
+                                              for r in sample.itertuples()])))
+    return dict(candidates=list(candidates), windows=windows, rmse_saar=errors,
+                truth_saar=truth, truth_vintage_rule="same current-origin GDP snapshot as outer training",
+                origin_rule="same calendar day/time shifted by whole quarters", validation_audits=audits)
+
+
 def run_pit_backtest(
     provider: AsofVintageProvider, origins: pd.DataFrame, *,
     models: Sequence[str] = ("naive_last", "mean_growth", "ar4"),
     covariates: Sequence[str] = (), min_train: int = 24, rolling_size: int | None = None,
+    seed: int = 0, on_model_error: str = "raise", ensemble_windows: int = 8,
+    chronos_checkpoint: str | None = None,
+    ensemble_candidates: Sequence[str] = ("ar4", "auto_arima", "random_forest", "bridge_ridge", "mean_growth", "last_growth"),
 ) -> tuple[pd.DataFrame, list[dict]]:
-    """Forecast explicit (origin_date, target_quarter) requests; never read scoring truth.
+    """Forecast at explicit origins, using only their verified information sets.
 
-    Horizon is the calendar-quarter distance from the last *available* GDP level.
-    A rolling window contains N contiguous observed GDP levels, not ragged rows.
+    Optional error recording preserves a row for every requested model, with NaN
+    predictions and pit_validated=False on failure. No fallback or silent omission.
+    Hyperparameter selection is training-only; ensemble selection replays earlier
+    PIT origins. Scoring releases are never passed into this forecasting function.
     """
     if not provider.strict_pit:
         raise PITError("Strict benchmark requires strict_pit=True")
     if not models or len(set(models)) != len(models) or set(models) - set(MODELS):
         raise PITError(f"Predeclared supported models required: {MODELS}")
+    if on_model_error not in {"raise", "record"}:
+        raise PITError("on_model_error must be raise or record")
     if len(set(covariates)) != len(covariates) or "GDPC1" in covariates:
         raise PITError("Covariates must be unique and cannot include the GDP target")
     if any(provider.series_specs.get(c, {}).get("series_id", c) == "GDPC1" for c in covariates):
@@ -130,11 +170,17 @@ def run_pit_backtest(
         raise PITError("Explicit forecast origins and target quarters are required")
     if origins.duplicated(["origin_date", "target_quarter"]).any():
         raise PITError("Duplicate forecast request")
+    if set(models) & set(ENSEMBLES):
+        if (ensemble_windows < 4 or len(set(ensemble_candidates)) != len(ensemble_candidates)
+                or len(ensemble_candidates) < 5 or set(ensemble_candidates) - (set(MODELS) - set(ENSEMBLES) - {"chronos2"})):
+            raise PITError("Ensembles require >=4 earlier quarters and >=5 unique non-ensemble candidates")
     rows, audits = [], []
     config = dict(models=list(models), covariates=list(covariates), min_train=min_train,
                   rolling_size=rolling_size, series_specs=provider.series_specs,
                   covariate_mode=provider.covariate_mode, ridge_penalty=1., ar_lags=4,
-                  model_selection="fixed, no test-set selection", seed=0)
+                  model_selection="fixed specifications; training-only automatic orders; nested PIT ensembles",
+                  seed=seed, on_model_error=on_model_error, chronos_checkpoint=chronos_checkpoint,
+                  ensemble_windows=ensemble_windows, ensemble_candidates=list(ensemble_candidates))
     for request in origins.sort_values("origin_date").itertuples():
         origin, target = pd.Timestamp(request.origin_date), pd.Period(request.target_quarter, freq="Q-DEC")
         cutoff = information_date(origin)
@@ -146,7 +192,7 @@ def run_pit_backtest(
             raise PITError("Invalid GDP training levels")
         if rolling_size is not None:
             y = y.iloc[-rolling_size:]
-        if not y.index.equals(pd.period_range(y.index.min(), y.index.max(), freq="Q-DEC")):
+        if y.empty or not y.index.equals(pd.period_range(y.index.min(), y.index.max(), freq="Q-DEC")):
             raise PITError("Internal GDP gap: do not compress missing calendar quarters")
         if len(y) < min_train:
             raise PITError(f"Insufficient PIT GDP history at {origin.date()}: {len(y)} levels")
@@ -157,46 +203,111 @@ def run_pit_backtest(
         if steps > 8:
             raise PITError("Horizon exceeds the supported eight-quarter limit")
         g = np.diff(np.log(y.to_numpy()))
-        features = None
-        if "bridge_ridge" in models:
-            if not covariates or meta["unresolved_variables"]:
-                raise PITError("Bridge requires all predeclared covariates in the PIT store")
-            index = pd.period_range(y.index[1], target, freq="Q-DEC")
-            features = panel.reindex(index)[list(covariates)].copy()
-            for variable in covariates:
-                counts = meta["quarterly_observation_counts"][variable]
-                features[variable + "__count"] = [counts.get(str(q), 0) for q in index]
-                features[variable + "__missing"] = features[variable].isna().astype(float)
-        audit = dict(origin_date=origin.isoformat(), target_quarter=str(target), config=config,
-                     training_start=str(y.index[0]), training_end=str(last), training_levels=len(y),
-                     **meta)
-        audit["input_scope"] = "snapshot records inspected; fitted GDP range is training_start..training_end"
-        audit["model_input_columns"] = {m: ["GDPC1", *list(covariates)] if m == "bridge_ridge" else ["GDPC1"]
-                                        for m in models}
-        audit_id = content_hash(audit)
-        audit["audit_id"] = audit_id
-        audits.append(audit)
-        for model in models:
-            if model == "naive_last":
-                path = [0.] * steps
-            elif model == "last_growth":
-                path = [float(g[-1])] * steps
-            elif model == "mean_growth":
-                path = [float(g.mean())] * steps
+        index = pd.period_range(y.index[1], target, freq="Q-DEC")
+        features = panel.reindex(index=index, columns=list(covariates)).copy()
+        for variable in covariates:
+            counts = meta["quarterly_observation_counts"].get(variable, {})
+            features[variable + "__count"] = [counts.get(str(q), 0) for q in index]
+            features[variable + "__missing"] = features[variable].isna().astype(float)
+        fits, selection = {}, None
+        def fit(name):
+            nonlocal selection
+            if name in fits:
+                return fits[name]
+            if name in COVARIATE_MODELS and (not covariates or meta["unresolved_variables"]):
+                raise UnsupportedModel(f"{name} requires all predeclared covariates in the PIT store")
+            if name in ENSEMBLES:
+                if selection is None:
+                    selection = _ensemble_validation(provider, origin, target, y, candidates=ensemble_candidates,
+                        windows=ensemble_windows, covariates=covariates, min_train=min_train,
+                        rolling_size=rolling_size, seed=seed)
+                n = 3 if name == "ensemble_avg_top3" else 5
+                selected = sorted(ensemble_candidates, key=lambda m: (selection["rmse_saar"][m], m))[:n]
+                weights = np.ones(n) if n == 3 else 1. / np.maximum([selection["rmse_saar"][m] for m in selected], 1e-8)
+                weights /= weights.sum()
+                # Combine GDP levels and derive a coherent growth path, including h > 1.
+                levels = np.array([float(y.iloc[-1]) * np.exp(np.cumsum(fit(m)[0])) for m in selected])
+                average = weights @ levels
+                path = np.diff(np.log(np.r_[float(y.iloc[-1]), average]))
+                details = dict(selected_members=selected, weights=weights.tolist(),
+                               averaging="GDP levels", selection=selection)
+            elif name == "naive_last":
+                path, details = [0.] * steps, {}
+            elif name == "last_growth":
+                path, details = [float(g[-1])] * steps, {}
+            elif name == "mean_growth":
+                path, details = [float(g.mean())] * steps, {}
+            elif name in {"ar4", "bridge_ridge"}:
+                path = _regression_path(g, steps, features if name == "bridge_ridge" else None)
+                details = dict(lags=4, ridge_penalty=1. if name == "bridge_ridge" else 0.)
             else:
-                path = _regression_path(g, steps, features if model == "bridge_ridge" else None)
-            with np.errstate(over="raise", invalid="raise"):
-                level = float(y.iloc[-1] * np.exp(np.sum(path)))
-                saar = float(100 * np.expm1(4 * path[-1]))
-            if not np.isfinite([level, saar]).all() or level <= 0:
-                raise PITError(f"Invalid forecast from {model}")
-            rows.append(dict(model=model, origin_date=origin.isoformat(), target_quarter=str(target),
-                             horizon=steps, information_cutoff=cutoff.date().isoformat(),
-                             training_min_quarter=str(y.index[0]), training_max_quarter=str(last),
-                             n_train=len(y), y_hat_level=level, g_hat_saar=saar, audit_id=audit_id,
-                             max_vintage_used=max(v["vintage_date"] for v in meta["inputs"]),
-                             pit_validated=True))
+                data = ModelData(y=y, features=features, covariates=tuple(covariates), metadata=meta,
+                                 steps=steps, seed=model_seed(seed, name, cutoff.date().isoformat(), str(target)),
+                                 chronos_checkpoint=chronos_checkpoint, origin=origin.isoformat())
+                path, details = forecast_model(name, data)
+            path = np.asarray(path, float)
+            if path.shape != (steps,) or not np.isfinite(path).all():
+                raise PITError(f"Invalid forecast path from {name}")
+            details["growth_path"] = path.tolist()
+            fits[name] = path, details
+            return fits[name]
+        def input_columns(name):
+            if name in ENSEMBLES:
+                return list(dict.fromkeys(c for m in fits[name][1]["selected_members"] for c in input_columns(m)))
+            if name.startswith("bvar_") and name in fits:
+                return ["GDPC1", *fits[name][1]["covariates"]]
+            return ["GDPC1", *covariates] if name in COVARIATE_MODELS else ["GDPC1"]
+        pending, errors = [], {}
+        for model in models:
+            try:
+                path, _ = fit(model)
+                with np.errstate(over="raise", invalid="raise"):
+                    level = float(y.iloc[-1] * np.exp(np.sum(path)))
+                    saar = float(100 * np.expm1(4 * path[-1]))
+                if not np.isfinite([level, saar]).all() or level <= 0:
+                    raise PITError(f"Invalid forecast from {model}")
+                status, error = "ok", ""
+            except (PITError, ImportError, OSError, ValueError, RuntimeError, FloatingPointError, np.linalg.LinAlgError) as exc:
+                if on_model_error == "raise":
+                    raise PITError(f"{model} at {origin.date()}: {exc}") from exc
+                level, saar = np.nan, np.nan
+                status = "unsupported" if isinstance(exc, (UnsupportedModel, ImportError)) else "failed"
+                error = f"{type(exc).__name__}: {exc}"
+                errors[model] = dict(status=status, error=error)
+            pending.append(dict(model=model, origin_date=origin.isoformat(), target_quarter=str(target),
+                horizon=steps, information_cutoff=cutoff.date().isoformat(),
+                training_min_quarter=str(y.index[0]), training_max_quarter=str(last), n_train=len(y),
+                y_hat_level=level, g_hat_saar=saar, status=status, error=error,
+                max_vintage_used=max(v["vintage_date"] for v in meta["inputs"]
+                    if v["variable"] in input_columns(model) and
+                    (v["variable"] != "GDPC1" or pd.Period(v["obs_date"], freq="Q") in y.index)) if status == "ok" else None,
+                max_vintage_inspected=max(v["vintage_date"] for v in meta["inputs"]), pit_validated=status == "ok"))
+        audit = dict(origin_date=origin.isoformat(), target_quarter=str(target), config=config,
+                     training_start=str(y.index[0]), training_end=str(last), training_levels=len(y), **meta)
+        audit["input_scope"] = "snapshot records inspected; fitted GDP range is training_start..training_end; nested audits retain ensemble origins"
+        audit["model_input_columns"] = {m: input_columns(m) if m not in errors else [] for m in models}
+        audit["model_fits"] = {name: detail for name, (_, detail) in fits.items()}
+        audit["model_errors"] = errors
+        audit["audit_id"] = content_hash(audit)
+        audits.append(audit)
+        for row in pending:
+            row["audit_id"] = audit["audit_id"]
+        rows.extend(pending)
     return pd.DataFrame(rows), audits
+
+
+def provenance_ids(value):
+    """Collect response evidence recursively, including nested ensemble validation."""
+    ids = set()
+    if isinstance(value, dict):
+        if "provenance_id" in value:
+            ids.add(value["provenance_id"])
+        for child in value.values():
+            ids.update(provenance_ids(child))
+    elif isinstance(value, list):
+        for child in value:
+            ids.update(provenance_ids(child))
+    return ids
 
 
 def score_forecasts(forecasts: pd.DataFrame, truth: pd.DataFrame) -> pd.DataFrame:

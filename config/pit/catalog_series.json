@@ -1,0 +1,22 @@
+{
+  "GDPC1": {"frequency": "Q"},
+  "UNRATE": {"frequency": "M", "tcode": 1},
+  "FEDFUNDS": {"frequency": "M", "tcode": 1},
+  "CPIAUCSL": {"frequency": "M", "tcode": 5},
+  "INDPRO": {"frequency": "M", "tcode": 5},
+  "PAYEMS": {"frequency": "M", "tcode": 5},
+  "HOUST": {"frequency": "M", "tcode": 5},
+  "GS10": {"frequency": "M", "tcode": 1},
+  "M2REAL": {"frequency": "M", "tcode": 5},
+  "IPFINAL": {"frequency": "M", "tcode": 5},
+  "TB3MS": {"frequency": "M", "tcode": 1},
+  "SPCS20RSA": {"frequency": "M", "tcode": 5},
+  "WPSFD49207": {"frequency": "M", "tcode": 5},
+  "EXUSEU": {"frequency": "M", "tcode": 5},
+  "DPCERA3M086SBEA": {"frequency": "M", "tcode": 5},
+  "CMRMTSPL": {"frequency": "M", "tcode": 5},
+  "PERMIT": {"frequency": "M", "tcode": 5},
+  "UMCSENT": {"frequency": "M", "tcode": 1},
+  "PPIFIS": {"frequency": "M", "tcode": 5},
+  "GS5": {"frequency": "M", "tcode": 1}
+}
