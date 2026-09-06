@@ -9,7 +9,7 @@ import json
 import math
 from typing import Sequence
 
-from .pit_models import (CATALOG_MODELS, COVARIATE_MODELS, ENSEMBLES,
+from .pit_models import (CATALOG_MODELS, COVARIATE_MODELS, ENSEMBLES, FOUNDATION_MODELS,
                          ModelData, UnsupportedModel, forecast_model, model_seed)
 
 import numpy as np
@@ -145,6 +145,7 @@ def run_pit_backtest(
     covariates: Sequence[str] = (), min_train: int = 24, rolling_size: int | None = None,
     seed: int = 0, on_model_error: str = "raise", ensemble_windows: int = 8,
     chronos_checkpoint: str | None = None,
+    foundation_checkpoints: dict[str, str] | None = None, model_use: str = "production",
     ensemble_candidates: Sequence[str] = ("ar4", "auto_arima", "random_forest", "bridge_ridge", "mean_growth", "last_growth"),
 ) -> tuple[pd.DataFrame, list[dict]]:
     """Forecast at explicit origins, using only their verified information sets.
@@ -160,6 +161,11 @@ def run_pit_backtest(
         raise PITError(f"Predeclared supported models required: {MODELS}")
     if on_model_error not in {"raise", "record"}:
         raise PITError("on_model_error must be raise or record")
+    if model_use not in {"research", "production"}:
+        raise PITError("model_use must be research or production")
+    foundation_checkpoints = dict(foundation_checkpoints or {})
+    if set(foundation_checkpoints) - {"tabpfn_bridge", "tabpfn_ts", "timesfm3"}:
+        raise PITError("Unknown foundation checkpoint key; Chronos variants use chronos_checkpoint")
     if len(set(covariates)) != len(covariates) or "GDPC1" in covariates:
         raise PITError("Covariates must be unique and cannot include the GDP target")
     if any(provider.series_specs.get(c, {}).get("series_id", c) == "GDPC1" for c in covariates):
@@ -172,7 +178,7 @@ def run_pit_backtest(
         raise PITError("Duplicate forecast request")
     if set(models) & set(ENSEMBLES):
         if (ensemble_windows < 4 or len(set(ensemble_candidates)) != len(ensemble_candidates)
-                or len(ensemble_candidates) < 5 or set(ensemble_candidates) - (set(MODELS) - set(ENSEMBLES) - {"chronos2"})):
+                or len(ensemble_candidates) < 5 or set(ensemble_candidates) - (set(MODELS) - set(ENSEMBLES) - set(FOUNDATION_MODELS))):
             raise PITError("Ensembles require >=4 earlier quarters and >=5 unique non-ensemble candidates")
     rows, audits = [], []
     config = dict(models=list(models), covariates=list(covariates), min_train=min_train,
@@ -180,6 +186,7 @@ def run_pit_backtest(
                   covariate_mode=provider.covariate_mode, ridge_penalty=1., ar_lags=4,
                   model_selection="fixed specifications; training-only automatic orders; nested PIT ensembles",
                   seed=seed, on_model_error=on_model_error, chronos_checkpoint=chronos_checkpoint,
+                  foundation_checkpoints=foundation_checkpoints, model_use=model_use,
                   ensemble_windows=ensemble_windows, ensemble_candidates=list(ensemble_candidates))
     for request in origins.sort_values("origin_date").itertuples():
         origin, target = pd.Timestamp(request.origin_date), pd.Period(request.target_quarter, freq="Q-DEC")
@@ -243,7 +250,8 @@ def run_pit_backtest(
             else:
                 data = ModelData(y=y, features=features, covariates=tuple(covariates), metadata=meta,
                                  steps=steps, seed=model_seed(seed, name, cutoff.date().isoformat(), str(target)),
-                                 chronos_checkpoint=chronos_checkpoint, origin=origin.isoformat())
+                                 chronos_checkpoint=chronos_checkpoint, origin=origin.isoformat(),
+                                 foundation_checkpoints=foundation_checkpoints, model_use=model_use)
                 path, details = forecast_model(name, data)
             path = np.asarray(path, float)
             if path.shape != (steps,) or not np.isfinite(path).all():
@@ -274,10 +282,16 @@ def run_pit_backtest(
                 status = "unsupported" if isinstance(exc, (UnsupportedModel, ImportError)) else "failed"
                 error = f"{type(exc).__name__}: {exc}"
                 errors[model] = dict(status=status, error=error)
+            checkpoint = fits[model][1].get("checkpoint", {}) if status == "ok" else {}
+            checkpoint_manifest = checkpoint.get("manifest", {})
             pending.append(dict(model=model, origin_date=origin.isoformat(), target_quarter=str(target),
                 horizon=steps, information_cutoff=cutoff.date().isoformat(),
                 training_min_quarter=str(y.index[0]), training_max_quarter=str(last), n_train=len(y),
                 y_hat_level=level, g_hat_saar=saar, status=status, error=error,
+                model_use=model_use, checkpoint_repository=checkpoint_manifest.get("repository"),
+                checkpoint_revision=checkpoint_manifest.get("revision"),
+                checkpoint_published_at=checkpoint_manifest.get("publication_evidence", {}).get("created_at"),
+                checkpoint_license=checkpoint.get("license"), checkpoint_research_only=checkpoint.get("research_only"),
                 max_vintage_used=max(v["vintage_date"] for v in meta["inputs"]
                     if v["variable"] in input_columns(model) and
                     (v["variable"] != "GDPC1" or pd.Period(v["obs_date"], freq="Q") in y.index)) if status == "ok" else None,

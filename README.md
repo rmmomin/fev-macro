@@ -31,7 +31,7 @@ python3 -m venv .venv-pit
 
 Outputs include `forecasts.csv`, `truth.csv`, `scored.csv`, paired `metrics.csv`, per-origin `audit.json`, portable `api_responses.json`, and `manifest.json`. Forecast rows link to the audit using a content hash. Stored API responses retain request bounds, values, interval endpoints, retrieval time, and provenance IDs without API keys.
 
-The five core models above retain a minimal NumPy/Pandas runtime. The strict catalog now includes all 24 original registry entries plus four additional baselines/ensemble variants: ARIMA/ETS/Theta, state-space, trees, four BVARs, PCA, a genuine monthly/quarterly DFM, LSTMs, causal ensembles and gated Chronos. See [exact model specifications](docs/models.md). Imputation/scaling/PCA use training data only; every fit failure is explicit.
+The five core models above retain a minimal NumPy/Pandas runtime. The strict catalog has 32 entries: all 24 original registry names, four additional baselines/ensemble variants, and four new foundation adapters. It includes ARIMA/ETS/Theta, state-space, trees, BVARs, PCA, a monthly/quarterly DFM, LSTMs, causal ensembles, Chronos-2 with and without covariates, two TabPFN variants, and TimesFM 3. See [exact model specifications](docs/models.md). Imputation/scaling/PCA use training data only; every fit failure is explicit.
 
 ### Full catalog and unreleased-quarter nowcasts
 
@@ -61,6 +61,8 @@ python scripts/prepare_chronos_checkpoint.py \
 ```
 
 Without evidence, Chronos is reported unsupported (or aborts under the default error policy). A later checkpoint is refused for 2019 regardless of when its input GDP observations were released. The evidence establishes checkpoint availability, not an independent audit of its pretraining corpus.
+
+The optional `requirements-pit-foundation.txt` adds `tabpfn_bridge`, `tabpfn_ts`, and `timesfm3`. `chronos2_covariates` uses the existing Chronos installation and checkpoint. All four have explicit local checkpoint gates. The fixed TabPFN-3 and TimesFM-3 checkpoints require `--model-use research`; default production mode rejects them. Follow the [preparation and run instructions](docs/foundation_models.md), including their checkpoint licenses and GDP-only versus macro-covariate input definitions.
 
 Ensembles reconstruct eight earlier validation origins from their own snapshots and score only GDP outcomes known at the current origin. Their nested audits and API evidence are exported. They do not use a saved leaderboard. The feature universe and selection rule remain retrospective research choices unless separately preregistered.
 

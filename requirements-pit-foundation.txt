@@ -1,0 +1,9 @@
+# Optional research adapters. Checkpoint licenses are separate from package licenses.
+-r requirements-pit-catalog.txt
+tabpfn==8.5.0
+tabpfn-time-series==1.2.0
+timesfm==3.0.1
+tabpfn-client==0.5.1
+tabpfn-common-utils==0.2.19
+gluonts==0.17.0
+fev==0.7.0

@@ -17,18 +17,20 @@ from .fred_transforms import fred_transform
 from .pit import PITError
 
 CORE_MODELS = ("naive_last", "last_growth", "mean_growth", "ar4", "bridge_ridge")
+FOUNDATION_MODELS = ("chronos2", "chronos2_covariates", "tabpfn_bridge", "tabpfn_ts", "timesfm3")
 CATALOG_MODELS = (
     *CORE_MODELS, "mean", "drift", "seasonal_naive", "random_normal", "random_uniform",
     "random_permutation", "auto_arima", "auto_ets", "theta", "local_trend_ssm",
     "random_forest", "xgboost", "bvar_minnesota_8", "bvar_minnesota_20",
     "bvar_minnesota_growth_8", "bvar_minnesota_growth_20", "factor_pca_qd",
     "mixed_freq_dfm_md", "lstm_univariate", "lstm_multivariate",
-    "ensemble_avg_top3", "ensemble_weighted_top5", "chronos2",
+    "ensemble_avg_top3", "ensemble_weighted_top5", *FOUNDATION_MODELS,
 )
 ENSEMBLES = ("ensemble_avg_top3", "ensemble_weighted_top5")
 COVARIATE_MODELS = {
     "bridge_ridge", "random_forest", "xgboost", "factor_pca_qd", "mixed_freq_dfm_md",
-    "lstm_multivariate", *[m for m in CATALOG_MODELS if m.startswith("bvar_")],
+    "lstm_multivariate", "tabpfn_bridge", "chronos2_covariates",
+    *[m for m in CATALOG_MODELS if m.startswith("bvar_")],
 }
 
 
@@ -46,6 +48,8 @@ class ModelData:
     seed: int = 0
     chronos_checkpoint: str | None = None
     origin: str | None = None
+    foundation_checkpoints: dict[str, str] | None = None
+    model_use: str = "production"
 
     @property
     def g(self):
@@ -357,12 +361,15 @@ def _dispatch(name, d):
         return _dfm(d)
     if name in {"lstm_univariate", "lstm_multivariate"}:
         return _lstm(d, name == "lstm_multivariate")
+    if name in FOUNDATION_MODELS and name != "chronos2":
+        from .pit_foundation import foundation_forecast
+        return foundation_forecast(name, d)
     if name == "chronos2":
         if not d.chronos_checkpoint:
             raise UnsupportedModel("Chronos-2 requires --chronos-checkpoint with publisher publication evidence and pinned artifact hashes")
         from .pit_checkpoint import validate_checkpoint
         try:
-            directory, evidence = validate_checkpoint(d.chronos_checkpoint, d.origin)
+            directory, evidence = validate_checkpoint(d.chronos_checkpoint, d.origin, model_use=d.model_use)
         except (PITError, OSError, KeyError, ValueError) as exc:
             raise UnsupportedModel(f"Inadmissible checkpoint: {exc}") from exc
         from chronos import Chronos2Pipeline

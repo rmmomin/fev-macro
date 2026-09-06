@@ -148,6 +148,59 @@ The pinned Chronos revision is `29ec3766d36d6f73f0696f85560a422f50e8498c`, [publ
 
 The migration establishes the strict temporal information contract for successful catalog runs under the documented specifications. It does not certify the original adapters, prove a preregistered feature/candidate universe, establish superior predictive performance, or retrospectively make the 2026 checkpoint available in 2019. Model failures remain possible and must stay visible. The BVAR is a penalized posterior-mode forecast, the DFM is a fixed one-factor monthly/quarterly specification, and the LSTMs are small fixed-budget estimators; richer variants require separate validation.
 
+## Foundation-model extension: four additional strict adapters
+
+The strict catalog now contains 32 models. Added `tabpfn_bridge`, `tabpfn_ts`, `timesfm3`, and `chronos2_covariates`, keeping the forecast origin at **2026-09-04**, information cutoff **2026-09-03**. Implementation and validation occurred retrospectively; these are not a claim of forecasts actually issued on that date.
+
+### Findings and controls
+
+| Severity | Issue and methodological consequence | Implemented control |
+|---|---|---|
+| **Critical** | New pretrained checkpoints did not exist in the 2019 evaluation period. Historical input vintages alone cannot make their use temporally admissible. | Generalized the immutable publisher/file-hash gate. All four new models are explicitly unsupported at the four 2019 origins; no numerical substitute or fabricated earlier publication date. |
+| **High** | A time-series API's “future covariates” could accidentally mean unreleased macro realizations. The stock TabPFN-TS wrapper also drops past-only covariates. | Direct TabPFN bridge consumes verified quarterly features. Chronos receives only origin-known partial means/counts/missing indicators, with NaN for unavailable values. TabPFN-TS receives GDP only, with no silently discarded macro columns. |
+| **High** | Package-code licenses do not establish permission to use the corresponding weights in production. | Fixed TabPFN-3 and TimesFM-3 specifications require explicit research mode. Default production mode refuses them. Publisher license files are hashed; CSVs and audits retain use mode, license, repository, revision and publication date. A manifest's editable license label cannot override the gate. |
+| **Medium** | An interrupted Xet download followed by a resumed HTTP transfer yielded a TimesFM weight file of the expected size with a zero-filled header and incorrect SHA-256. Loading it would break reproducibility and inference. | Hash validation refused the file. A fresh cache returned the exact publisher LFS hash. Preparation now checks cached weight hashes before creating an output manifest and documents fresh-cache recovery. The rejected manifest is retained locally as evidence; rejected weights were removed. |
+| **Medium** | The real TimesFM API returns a one-dimensional single-target prediction, unlike the initial adapter expectation. Flattening arbitrary arrays could conceal target/horizon mistakes. | Corrected the explicit shape contract to `(horizon,)`. Actual two-step inference verifies it; wrong shapes, nonfinite outputs, duplicate TabPFN-TS rows and wrong quarter timestamps fail explicitly. |
+| **Low** | Library defaults can choose a different checkpoint, cloud engine, seed, or preprocessing configuration. | Explicit local checkpoint paths, fixed four-estimator TabPFN configuration, CPU/thread/seed settings, local-only Hugging Face loading, disabled TabPFN telemetry/browser flow, pinned direct packages, and runtime/provenance reporting. |
+
+`tabpfn_bridge` predicts log GDP growth from four growth lags and the declared macro panel. Preprocessing sees training rows only, and recursive predictions supply later target lags. `tabpfn_ts` uses the official wrapper and the explicit TabPFN-3 time-series checkpoint to predict log GDP levels from calendar/running-index/context-derived seasonal features. `timesfm3` is deliberately a **GDP-only comparator**; its multivariate capability is not enabled in this adapter. `chronos2_covariates` predicts log **growth** using quarterly summaries; the existing `chronos2` predicts log **levels**, so their difference is not a controlled estimate of the effect of covariates alone.
+
+Changes: `src/fev_macro/pit_foundation.py`, `pit_models.py`, `pit_checkpoint.py`, `pit_benchmark.py`; `scripts/prepare_foundation_checkpoint.py`, `scripts/run_pit_backtest.py`; `requirements-pit-foundation.txt`; `tests/test_pit_foundation.py`, catalog-test accounting, CI and pytest configuration; README, `docs/models.md`, `docs/realtime_protocol.md`, and `docs/foundation_models.md`.
+
+### Validation and results
+
+| Check | Result |
+|---|---|
+| Full suite, with live ALFRED and all real-checkpoint integration tests enabled | **184 passed, 1 skipped**; only the optional BoE dependency is unavailable |
+| New foundation contract tests without real weights | **34 passed, 4 opt-in integration skips** |
+| Actual pretrained packages/weights, two-step synthetic-series inference with socket connections disabled | **4/4 passed** |
+| Minimal core environment, strict contract/catalog/foundation tests | **99 passed, 27 skipped** for optional libraries/integrations |
+| Dependencies and patch format | `pip check` and `git diff --check` pass |
+| Full 2026Q3 catalog at the unchanged September 4 origin | **32/32 successful**; audit/source hashes and all 40 referenced API-response records verified |
+| Controlled comparison of the existing 28 Q3 models | **Exactly zero change** in every GDP-level and SAAR prediction |
+| Four-origin 2019 fixture backtest, two baselines plus four new adapters | **8 baseline forecasts**, 24 finite release-stage score rows; **16 explicit new-model exclusions**, never scored as valid forecasts |
+
+New Q3 outputs, q/q SAAR:
+
+| Model | Forecast |
+|---|---:|
+| TabPFN bridge | **1.712773%** |
+| TabPFN-TS | **−0.089327%** |
+| TimesFM 3 | **2.164952%** |
+| Chronos-2 with covariates | **2.804518%** |
+
+For comparison, the unchanged ridge bridge is 1.180755% and univariate Chronos-2 is 4.065582%. No Q3 truth or accuracy ranking is asserted. The negative TabPFN-TS prediction is retained, not replaced after inspecting the result. The three successful new-model predictions from the first partial run reproduce exactly in the final full-catalog run.
+
+Small portable tables: `docs/audit_foundation_2026q3.csv` and `docs/audit_foundation_2019_exclusions.csv`. Complete forecasts, nested audits, API ledgers and manifests: `results/pit_foundation_2026q3_20260904/final/` and `results/pit_foundation_2019/final/` (ignored local artifacts). Downloaded weights remain local and are not committed.
+
+Pinned publisher evidence:
+
+- TabPFN-3: repository `Prior-Labs/tabpfn_3`, commit `24a16a89d245878b846555110985634aa2e656d7`, published **2026-07-04**. Default-regressor SHA-256 `311ce18d97e9533d8585eaadafe040fbdd8070533209ed8696641dadc97a7301`; time-series-regressor SHA-256 `48ca82019fec74f08e15d56a157bbe728d6ec25c221f2ff2d4fd22fd4e09ec6e`.
+- TimesFM 3: repository `google/timesfm-3.0-pytorch`, commit `43046b85ec22d584a13f8098c2ed39c889e129c2`, published **2026-09-02**. Weight SHA-256 `a7592b0a8432baee54483254e5647856911ce69e09d09a9bb65904b2d98f17da`.
+- Chronos-2 with covariates uses the existing validated June 5 checkpoint described above.
+
+The temporal claim remains conditional on publisher archive fidelity and ALFRED provenance. Pretraining/fine-tuning corpora have not been independently audited; model/feature choices are retrospective; partial-quarter training/forecast distributions differ; and this exercise establishes neither forecast superiority nor production permission for restricted weights. Successful rows satisfy the documented data/checkpoint availability contract, not an unqualified claim of historically issued, preregistered forecasts.
+
 ## Remaining limitations and tradeoffs
 
 1. **Archive fidelity and timing:** ALFRED can correct historical archives; date-level releases cannot resolve intraday order. Excluding all same-day values sacrifices timeliness but avoids inventing it. Refresh/replay lookbacks do not discover arbitrary corrections years outside the lookback; periodic full revalidation is needed. Conflicting same-key corrections intentionally require investigation/rebuilding a new store.

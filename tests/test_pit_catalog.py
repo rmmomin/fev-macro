@@ -14,7 +14,7 @@ import pytest
 from test_pit_contract import ROOT, FIXTURES, store, real_store, ingest, obs, provider_for
 from fev_macro.pit import PITError, content_hash
 from fev_macro.pit_benchmark import MODELS, run_pit_backtest, provenance_ids
-from fev_macro.pit_models import CATALOG_MODELS, ModelData, forecast_model, standardize, monthly_inputs
+from fev_macro.pit_models import CATALOG_MODELS, FOUNDATION_MODELS, ModelData, forecast_model, standardize, monthly_inputs
 from fev_macro.pit_checkpoint import validate_checkpoint
 
 OPTIONAL = {
@@ -32,7 +32,7 @@ def test_every_legacy_registry_entry_is_explicitly_accounted_for():
     assert len(MODELS) == len(set(MODELS))
 
 
-@pytest.mark.parametrize('model', [m for m in MODELS if m not in {'chronos2', 'ensemble_avg_top3', 'ensemble_weighted_top5', 'mixed_freq_dfm_md'}])
+@pytest.mark.parametrize('model', [m for m in MODELS if m not in {*FOUNDATION_MODELS, 'ensemble_avg_top3', 'ensemble_weighted_top5', 'mixed_freq_dfm_md'}])
 def test_each_family_invariant_to_unavailable_revisions(real_store, model, monkeypatch):
     if model in OPTIONAL:
         pytest.importorskip(OPTIONAL[model])

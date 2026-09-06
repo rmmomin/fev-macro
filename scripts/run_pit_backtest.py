@@ -37,6 +37,10 @@ def main() -> None:
     p.add_argument("--on-model-error", choices=["raise", "record"], default="raise")
     p.add_argument("--ensemble-windows", type=int, default=8)
     p.add_argument("--chronos-checkpoint", help="Pinned local checkpoint evidence manifest")
+    for name in ("tabpfn-bridge", "tabpfn-ts", "timesfm3"):
+        p.add_argument(f"--{name}-checkpoint", help="Pinned local checkpoint evidence manifest")
+    p.add_argument("--model-use", choices=["production", "research"], default="production",
+                   help="Research permits restricted TabPFN-3 and TimesFM-3 checkpoints; consult their licenses")
     p.add_argument("--rolling-size", type=int)
     p.add_argument("--min-train", type=int, default=24)
     p.add_argument("--out", default="results/pit_backtest")
@@ -67,12 +71,15 @@ def main() -> None:
     if args.covariates_from_specs:
         args.covariates = [name for name in specs if name != "GDPC1"]
     provider = AsofVintageProvider(db_path=args.db, covariate_mode="processed", series_specs=specs)
+    foundation_checkpoints = {name: getattr(args, name + "_checkpoint") for name in
+                             ("tabpfn_bridge", "tabpfn_ts", "timesfm3") if getattr(args, name + "_checkpoint")}
     try:
         forecasts, audit = run_pit_backtest(provider, pd.read_csv(args.origins), models=args.models,
                                            covariates=args.covariates, rolling_size=args.rolling_size,
                                            min_train=args.min_train, seed=args.seed,
                                            on_model_error=args.on_model_error, ensemble_windows=args.ensemble_windows,
-                                           chronos_checkpoint=args.chronos_checkpoint)
+                                           chronos_checkpoint=args.chronos_checkpoint,
+                                           foundation_checkpoints=foundation_checkpoints, model_use=args.model_use)
         # Truth cannot affect fitting: it is opened only after forecasting.
         truth = scored = metrics = None
         if not args.forecast_only:
@@ -107,6 +114,8 @@ def main() -> None:
     (out / "api_responses.json").write_text(json.dumps(api_responses, indent=2) + "\n")
     manifest = dict(config=vars(args), input_sha256={Path(f).name: content_hash(Path(f).read_text())
                     for f in (args.origins, args.release_calendar, args.series_specs, args.chronos_checkpoint) if f},
+                    checkpoint_manifest_sha256={name: content_hash(Path(path).read_text())
+                                                for name, path in foundation_checkpoints.items()},
                     git_commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                     working_tree_dirty=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT)),
                     versions={m: importlib.metadata.version(m) for m in ("numpy", "pandas", "duckdb")},
@@ -114,7 +123,8 @@ def main() -> None:
                     audit_sha256=content_hash(audit), api_responses_sha256=content_hash(api_responses),
                     source_sha256={str(f.relative_to(ROOT)): content_hash(f.read_text())
                                    for f in [*sorted((ROOT / "src" / "fev_macro").glob("*.py")), Path(__file__).resolve()]})
-    for package in ("statsforecast", "statsmodels", "scikit-learn", "xgboost", "torch", "chronos-forecasting", "transformers", "scipy"):
+    for package in ("statsforecast", "statsmodels", "scikit-learn", "xgboost", "torch", "chronos-forecasting", "transformers", "scipy",
+                    "tabpfn", "tabpfn-time-series", "tabpfn-client", "tabpfn-common-utils", "timesfm", "huggingface-hub"):
         try:
             manifest["versions"][package] = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError:
