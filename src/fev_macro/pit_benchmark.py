@@ -146,6 +146,7 @@ def run_pit_backtest(
     seed: int = 0, on_model_error: str = "raise", ensemble_windows: int = 8,
     chronos_checkpoint: str | None = None,
     foundation_checkpoints: dict[str, str] | None = None, model_use: str = "production",
+    foundation_features: str = "quarterly",
     ensemble_candidates: Sequence[str] = ("ar4", "auto_arima", "random_forest", "bridge_ridge", "mean_growth", "last_growth"),
 ) -> tuple[pd.DataFrame, list[dict]]:
     """Forecast at explicit origins, using only their verified information sets.
@@ -163,6 +164,8 @@ def run_pit_backtest(
         raise PITError("on_model_error must be raise or record")
     if model_use not in {"research", "production"}:
         raise PITError("model_use must be research or production")
+    if foundation_features not in {"quarterly", "monthly_slots"}:
+        raise PITError("foundation_features must be quarterly or monthly_slots")
     foundation_checkpoints = dict(foundation_checkpoints or {})
     if set(foundation_checkpoints) - {"tabpfn_bridge", "tabpfn_ts", "timesfm3"}:
         raise PITError("Unknown foundation checkpoint key; Chronos variants use chronos_checkpoint")
@@ -187,6 +190,7 @@ def run_pit_backtest(
                   model_selection="fixed specifications; training-only automatic orders; nested PIT ensembles",
                   seed=seed, on_model_error=on_model_error, chronos_checkpoint=chronos_checkpoint,
                   foundation_checkpoints=foundation_checkpoints, model_use=model_use,
+                  foundation_features=foundation_features,
                   ensemble_windows=ensemble_windows, ensemble_candidates=list(ensemble_candidates))
     for request in origins.sort_values("origin_date").itertuples():
         origin, target = pd.Timestamp(request.origin_date), pd.Period(request.target_quarter, freq="Q-DEC")
@@ -252,6 +256,7 @@ def run_pit_backtest(
                                  steps=steps, seed=model_seed(seed, name, cutoff.date().isoformat(), str(target)),
                                  chronos_checkpoint=chronos_checkpoint, origin=origin.isoformat(),
                                  foundation_checkpoints=foundation_checkpoints, model_use=model_use)
+                data.foundation_features = foundation_features
                 path, details = forecast_model(name, data)
             path = np.asarray(path, float)
             if path.shape != (steps,) or not np.isfinite(path).all():
@@ -289,6 +294,7 @@ def run_pit_backtest(
                 training_min_quarter=str(y.index[0]), training_max_quarter=str(last), n_train=len(y),
                 y_hat_level=level, g_hat_saar=saar, status=status, error=error,
                 model_use=model_use, checkpoint_repository=checkpoint_manifest.get("repository"),
+                foundation_features=foundation_features if model in {"tabpfn_bridge", "chronos2_covariates"} else None,
                 checkpoint_revision=checkpoint_manifest.get("revision"),
                 checkpoint_published_at=checkpoint_manifest.get("publication_evidence", {}).get("created_at"),
                 checkpoint_license=checkpoint.get("license"), checkpoint_research_only=checkpoint.get("research_only"),

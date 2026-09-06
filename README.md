@@ -64,6 +64,17 @@ Without evidence, Chronos is reported unsupported (or aborts under the default e
 
 The optional `requirements-pit-foundation.txt` adds `tabpfn_bridge`, `tabpfn_ts`, and `timesfm3`. `chronos2_covariates` uses the existing Chronos installation and checkpoint. All four have explicit local checkpoint gates. The fixed TabPFN-3 and TimesFM-3 checkpoints require `--model-use research`; default production mode rejects them. Follow the [preparation and run instructions](docs/foundation_models.md), including their checkpoint licenses and GDP-only versus macro-covariate input definitions.
 
+The [GDPNow/NY Fed data collection](docs/nowcast_data.md) adds 24 monthly indicators
+to the original 19, plus two quarterly indicators. Of these, 41 monthly series
+enter the shared model panel; two advance inventory series and the quarterly
+auxiliaries remain separately collected research inputs. Use
+`config/pit/nowcast_series.json` for the expanded monthly panel and
+`--foundation-features monthly_slots` to preserve individual months in TabPFN
+bridge and Chronos-2 covariates. `scripts/check_pit_freshness.py` checks the full
+declared observation history against independent ALFRED cutoff snapshots and
+saves the API evidence. A fresh store is not proof that every agency release or
+every GDPNow/NY Fed input is covered; gaps and historical exclusions are explicit.
+
 Ensembles reconstruct eight earlier validation origins from their own snapshots and score only GDP outcomes known at the current origin. Their nested audits and API evidence are exported. They do not use a saved leaderboard. The feature universe and selection rule remain retrospective research choices unless separately preregistered.
 
 ```bash

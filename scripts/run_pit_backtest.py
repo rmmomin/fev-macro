@@ -41,6 +41,8 @@ def main() -> None:
         p.add_argument(f"--{name}-checkpoint", help="Pinned local checkpoint evidence manifest")
     p.add_argument("--model-use", choices=["production", "research"], default="production",
                    help="Research permits restricted TabPFN-3 and TimesFM-3 checkpoints; consult their licenses")
+    p.add_argument("--foundation-features", choices=["quarterly", "monthly_slots"], default="quarterly",
+                   help="TabPFN bridge/Chronos covariates: quarterly summaries or separate calendar-month values and masks")
     p.add_argument("--rolling-size", type=int)
     p.add_argument("--min-train", type=int, default=24)
     p.add_argument("--out", default="results/pit_backtest")
@@ -79,7 +81,8 @@ def main() -> None:
                                            min_train=args.min_train, seed=args.seed,
                                            on_model_error=args.on_model_error, ensemble_windows=args.ensemble_windows,
                                            chronos_checkpoint=args.chronos_checkpoint,
-                                           foundation_checkpoints=foundation_checkpoints, model_use=args.model_use)
+                                           foundation_checkpoints=foundation_checkpoints, model_use=args.model_use,
+                                           foundation_features=args.foundation_features)
         # Truth cannot affect fitting: it is opened only after forecasting.
         truth = scored = metrics = None
         if not args.forecast_only:

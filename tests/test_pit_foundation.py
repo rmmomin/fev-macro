@@ -120,10 +120,11 @@ def recordings(monkeypatch):
 
 
 @pytest.mark.parametrize('model', NEW_MODELS)
-def test_new_adapters_ignore_future_revisions_and_same_day_releases(real_store, manifests, recordings, model):
+@pytest.mark.parametrize('representation', ['quarterly', 'monthly_slots'])
+def test_new_adapters_ignore_future_revisions_and_same_day_releases(real_store, manifests, recordings, model, representation):
     p = provider_for(real_store, covariate_mode='processed')
     origin = pd.DataFrame([dict(origin_date='2019-02-15', target_quarter='2019Q1')])
-    kwargs = dict(models=[model], covariates=['UNRATE'], **options(manifests))
+    kwargs = dict(models=[model], covariates=['UNRATE'], foundation_features=representation, **options(manifests))
     try:
         before, a = run_pit_backtest(p, origin, **kwargs)
         ingest(real_store, 'GDPC1', [obs('2018-07-01','2019-02-15',1e8),obs('2019-01-01','2021-01-01',1e9)])
@@ -313,8 +314,9 @@ def test_cli_registers_all_adapters_and_explicit_research_use():
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize('model', NEW_MODELS)
-def test_actual_pinned_weights_with_network_disabled(model, monkeypatch):
+@pytest.mark.parametrize('model,representation', [(m,'quarterly') for m in NEW_MODELS] +
+                         [(m,'monthly_slots') for m in ['tabpfn_bridge','chronos2_covariates']])
+def test_actual_pinned_weights_with_network_disabled(model, representation, monkeypatch):
     """FEV_FOUNDATION_CHECKPOINTS points to a JSON map of existing local manifests."""
     config=os.environ.get('FEV_FOUNDATION_CHECKPOINTS')
     if not config: pytest.skip('Optional real foundation checkpoints not configured')
@@ -329,7 +331,11 @@ def test_actual_pinned_weights_with_network_disabled(model, monkeypatch):
     index=pd.period_range(q[1],q[-1]+2,freq='Q-DEC')
     features=pd.DataFrame({'X':rng.normal(size=len(index)), 'X__count':3.,'X__missing':0.},index=index)
     features.iloc[-1]=[np.nan,0.,1.]
-    data=ModelData(y,features,('X',),{'information_cutoff':'2026-09-03'},2,seed=13,origin='2026-09-04',**options(manifests))
+    monthly = pd.period_range(q[0].asfreq('M','start'), (q[-1]+1).asfreq('M','end'), freq='M')
+    inputs = [dict(variable='X',obs_date=str(m.start_time.date()),vintage_date=str((m+1).start_time.date()),
+                   frequency='M',tcode=1,value=float(rng.normal())) for m in monthly]
+    data=ModelData(y,features,('X',),{'information_cutoff':'2026-09-03','inputs':inputs},2,
+        seed=13,origin='2026-09-04',foundation_features=representation,**options(manifests))
     path,evidence=forecast_model(model,data)
     assert path.shape==(2,) and np.isfinite(path).all()
     assert evidence['checkpoint']['manifest']['revision'] != 'a'*40

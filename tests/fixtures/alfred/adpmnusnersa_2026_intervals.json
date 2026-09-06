@@ -1,0 +1,49 @@
+{
+  "params": {
+    "series_id": "ADPMNUSNERSA",
+    "output_type": 1,
+    "units": "lin",
+    "realtime_start": "1776-07-04",
+    "realtime_end": "9999-12-31",
+    "observation_start": "2026-07-01",
+    "observation_end": "2026-08-01",
+    "sort_order": "asc",
+    "limit": 100000,
+    "offset": 0
+  },
+  "response": {
+    "realtime_start": "1776-07-04",
+    "realtime_end": "9999-12-31",
+    "observation_start": "2026-07-01",
+    "observation_end": "2026-08-01",
+    "units": "lin",
+    "output_type": 1,
+    "file_type": "json",
+    "order_by": "observation_date",
+    "sort_order": "asc",
+    "count": 3,
+    "offset": 0,
+    "limit": 100000,
+    "observations": [
+      {
+        "realtime_start": "2026-08-05",
+        "realtime_end": "2026-09-01",
+        "date": "2026-07-01",
+        "value": "132763000.0"
+      },
+      {
+        "realtime_start": "2026-09-02",
+        "realtime_end": "9999-12-31",
+        "date": "2026-07-01",
+        "value": "132765000.0"
+      },
+      {
+        "realtime_start": "2026-09-02",
+        "realtime_end": "9999-12-31",
+        "date": "2026-08-01",
+        "value": "132803000.0"
+      }
+    ]
+  },
+  "retrieved_at": "2026-09-06T23:13:10.431468+00:00"
+}

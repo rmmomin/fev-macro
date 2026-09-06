@@ -23,4 +23,4 @@ jobs:
         run: |
           python -m pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cpu
           python -m pip install -r requirements-pit-foundation.txt
-      - run: python -m pytest tests/test_pit_contract.py tests/test_pit_catalog.py tests/test_pit_foundation.py -q
+      - run: python -m pytest tests/test_pit_contract.py tests/test_pit_catalog.py tests/test_pit_foundation.py tests/test_pit_nowcast.py -q

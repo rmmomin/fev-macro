@@ -1,0 +1,21 @@
+model,origin_date,status,error
+chronos2,2019-04-25T00:00:00,unsupported,UnsupportedModel: Inadmissible checkpoint: Checkpoint was not available before the forecast origin
+chronos2_covariates,2019-04-25T00:00:00,unsupported,UnsupportedModel: Inadmissible chronos2_covariates checkpoint: Checkpoint was not available before the forecast origin
+tabpfn_bridge,2019-04-25T00:00:00,unsupported,UnsupportedModel: Inadmissible tabpfn_bridge checkpoint: Checkpoint was not available before the forecast origin
+tabpfn_ts,2019-04-25T00:00:00,unsupported,UnsupportedModel: Inadmissible tabpfn_ts checkpoint: Checkpoint was not available before the forecast origin
+timesfm3,2019-04-25T00:00:00,unsupported,UnsupportedModel: Inadmissible timesfm3 checkpoint: Checkpoint was not available before the forecast origin
+chronos2,2019-07-25T00:00:00,unsupported,UnsupportedModel: Inadmissible checkpoint: Checkpoint was not available before the forecast origin
+chronos2_covariates,2019-07-25T00:00:00,unsupported,UnsupportedModel: Inadmissible chronos2_covariates checkpoint: Checkpoint was not available before the forecast origin
+tabpfn_bridge,2019-07-25T00:00:00,unsupported,UnsupportedModel: Inadmissible tabpfn_bridge checkpoint: Checkpoint was not available before the forecast origin
+tabpfn_ts,2019-07-25T00:00:00,unsupported,UnsupportedModel: Inadmissible tabpfn_ts checkpoint: Checkpoint was not available before the forecast origin
+timesfm3,2019-07-25T00:00:00,unsupported,UnsupportedModel: Inadmissible timesfm3 checkpoint: Checkpoint was not available before the forecast origin
+chronos2,2019-10-25T00:00:00,unsupported,UnsupportedModel: Inadmissible checkpoint: Checkpoint was not available before the forecast origin
+chronos2_covariates,2019-10-25T00:00:00,unsupported,UnsupportedModel: Inadmissible chronos2_covariates checkpoint: Checkpoint was not available before the forecast origin
+tabpfn_bridge,2019-10-25T00:00:00,unsupported,UnsupportedModel: Inadmissible tabpfn_bridge checkpoint: Checkpoint was not available before the forecast origin
+tabpfn_ts,2019-10-25T00:00:00,unsupported,UnsupportedModel: Inadmissible tabpfn_ts checkpoint: Checkpoint was not available before the forecast origin
+timesfm3,2019-10-25T00:00:00,unsupported,UnsupportedModel: Inadmissible timesfm3 checkpoint: Checkpoint was not available before the forecast origin
+chronos2,2020-01-25T00:00:00,unsupported,UnsupportedModel: Inadmissible checkpoint: Checkpoint was not available before the forecast origin
+chronos2_covariates,2020-01-25T00:00:00,unsupported,UnsupportedModel: Inadmissible chronos2_covariates checkpoint: Checkpoint was not available before the forecast origin
+tabpfn_bridge,2020-01-25T00:00:00,unsupported,UnsupportedModel: Inadmissible tabpfn_bridge checkpoint: Checkpoint was not available before the forecast origin
+tabpfn_ts,2020-01-25T00:00:00,unsupported,UnsupportedModel: Inadmissible tabpfn_ts checkpoint: Checkpoint was not available before the forecast origin
+timesfm3,2020-01-25T00:00:00,unsupported,UnsupportedModel: Inadmissible timesfm3 checkpoint: Checkpoint was not available before the forecast origin

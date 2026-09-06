@@ -201,6 +201,101 @@ Pinned publisher evidence:
 
 The temporal claim remains conditional on publisher archive fidelity and ALFRED provenance. Pretraining/fine-tuning corpora have not been independently audited; model/feature choices are retrospective; partial-quarter training/forecast distributions differ; and this exercise establishes neither forecast superiority nor production permission for restricted weights. Successful rows satisfy the documented data/checkpoint availability contract, not an unqualified claim of historically issued, preregistered forecasts.
 
+## September 6 update: release coverage, freshness and monthly features
+
+The foundation adapters were first committed as `9c95d39`. This follow-up uses
+the supplied GDPNow workbook, supplied New York Fed data-flow PDF, official
+Fed release information and actual ALFRED responses. Source identities,
+indicator mappings and reproduction commands are in
+[docs/nowcast_data.md](docs/nowcast_data.md). Neither attachment was modified
+or treated as a set of execution instructions.
+
+### Findings and actions
+
+| Severity | Finding and methodological consequence | Action / remaining limitation |
+|---|---|---|
+| **Critical** | A current ADP series contains observations from 2010 but has no retrieved vintage before August 31, 2022. Treating its observation dates as release dates would contaminate older forecasts. | Collected its genuine vintages without splicing the discontinued methodology. The full-universe 2019 diagnostic excludes models requiring it. A separately declared historical experiment omits ADP before fitting. No automatic column dropping or checkpoint date override. |
+| **High** | The original 19-indicator panel missed important GDPNow/NY Fed release categories, including trade, retail, construction, inventories/orders, income, core prices, JOLTS and regional surveys. “Fresh” alone would obscure that incomplete universe. | Collected 24 additional monthly indicators and two quarterly auxiliaries. The final common model panel uses 41 monthly indicators; four additional series remain separately collected research inputs. Exact definitions, transformations, exclusions and archive-start limitations are documented. |
+| **High** | Advance wholesale/retail inventory snapshots retain only June and July 2026 as usable values at this cutoff; older observations are missing. Current-snapshot growth features therefore have no historical training sample, despite a long list of historical observation dates. | Retained raw vintages and captured two complete snapshot fixtures. The exploratory full-panel DFM correctly failed. These two series are explicitly outside the final common model panel, pending a tested release-event representation. Missing/withdrawn values are never resurrected as current observations. This release coverage gap remains in the forecasts, although the raw data is collected. |
+| **High** | Similar-looking FRED IDs can be economically different: `AMDMIS` is an inventory/shipments ratio, `AMDMTI` is inventory levels; `ADPWNUSNERSA` is weekly, `ADPMNUSNERSA` monthly. The explicit sync CLI could previously reuse alias resolution. | Exact-ID requests now bypass aliases entirely, verify the returned identity and, with `--series-specs`, require the declared native frequency. Added a regression test with a deliberately wrong stored alias and wrong API frequency. |
+| **Medium** | Averaging the released months destroys their within-quarter order and treats different monthly paths alike. | Added opt-in `--foundation-features monthly_slots` for TabPFN bridge and Chronos-2 covariates. Native transformation precedes calendar alignment and training-window selection; separate month values/masks preserve gaps. Quarterly covariates stay quarterly. CSV/audit record representation, columns, hashes and forecast features. The old quarterly mode remains an explicit comparator. |
+| **Medium** | A previously fetched database is not automatically valid at a later cutoff. The old store's API evidence ended September 3, so querying September 5 yielded no current usable rows, correctly. Checking only the latest observation month would also miss revisions. | Refreshed verified interval evidence, preserved the old database, and added independent full-snapshot equality checks with complete pagination, missing/revision detection, sanitized raw responses and hashes. All 46 collected series match ALFRED at September 5 within the 2005-onward range. This is not a guarantee that all agency releases have reached ALFRED. |
+| **Low** | The supplied NY Fed PDF was printed September 6 but displays a July 31, 2026Q2 data-flow view. GDPNow uses model-filled monthly values and some revised historical sheets. Neither is an intraday vintage database. | Used them to identify releases/indicators, not as raw historical observations or as evidence of the latest NY Fed Q3 estimate. Retained the prior-New-York-day rule. ISM remains unavailable via FRED and is explicitly excluded. |
+
+The GDPNow page reports 4.7% for 2026Q3 on September 3; the workbook contains
+4.748663%. The next listed update is September 10. Our September 6 origin
+also admits September 4 employment and vehicle-sales vintages. Within the
+original 19 indicators, the refresh adds August unemployment (4.1%) and payrolls
+(159,075 thousand), and revises June/July payroll levels by +11/+55 thousand.
+August payroll growth is consequently +162 thousand. These differences are
+recorded in `docs/audit_nowcast_release_changes.csv`.
+
+### Validation and controlled comparisons
+
+- Full suite with live ALFRED and real local checkpoint integrations:
+  **212 passed, 1 skipped** (optional BoE dependency).
+- Minimal core environment: **125 passed, 29 optional skips**. `pip check` and
+  `git diff --check` pass.
+- The six real-weight tests cover all four new adapters and both monthly-slot
+  adapters with socket connections disabled. Synthetic tests cover identical
+  quarterly means with different monthly order, cross-quarter log differences,
+  missing native months, monthly/quarterly alignment, forecast-origin revisions,
+  future-record rejection, training-only fitting, provenance and API failure.
+- Twelve new captured API fixtures: ten representative interval responses and
+  two advance-inventory cutoff snapshots. Tests assert same-day exclusion,
+  next-day availability, advance/full-report revision transitions, missing
+  historical values and bounded snapshot expiry.
+- Independent freshness check: **46/46 fresh, zero differing observations**.
+  The two advance series have only **two usable observations each** at this
+  cutoff; freshness is not training suitability.
+- Final 2026Q3 run: **32/32 successful**, with 41 monthly indicators; all
+  **84 referenced API-response records**, source hashes and audit hashes verified.
+- Four-origin 2019 backtest, explicitly declared 40-monthly-indicator panel
+  excluding post-2022 ADP: **108 valid forecasts**, **324 finite release-stage
+  forecast/actual pairs**, and **20 unsupported foundation requests** (five
+  later checkpoints at four origins). Those unsupported rows are retained but
+  have no numerical forecast or valid score. No 2019 model ranking is inferred
+  from four target quarters.
+- Preserved diagnostics include the full-universe ADP exclusions and sparse
+  advance-series failures. They are not overwritten by the admitted-panel run.
+
+Q3 comparisons below are q/q SAAR, in percent. The last three forecast columns
+use the **same September 6 origin and model seed**. The first uses September 4 and therefore
+differs in both information cutoff and origin-derived stochastic seeds; that
+change is not attributed exclusively to new data.
+
+| Model | Sep 4, 19 indicators, quarterly | Sep 6, 19 indicators, quarterly | Sep 6, 19 indicators, monthly slots | Sep 6, 41 indicators, monthly slots |
+|---|---:|---:|---:|---:|
+| TabPFN bridge | 1.712773 | 1.951864 | 1.698002 | **2.027130** |
+| Chronos-2 covariates | 2.804518 | 3.089783 | 2.050478 | **2.471740** |
+
+Thus preserving months changes TabPFN by −0.253862 and Chronos by −1.039305
+percentage points in the fixed-universe comparison. Expanding the admitted
+universe then changes them by +0.329128 and +0.421262 points. These are forecast
+sensitivities, not accuracy improvements. The final DFM is 2.223254%, TimesFM-3
+2.164952%, TabPFN-TS −0.421879%, and the ridge bridge 5.799906%. Wide dispersion
+and the negative forecast remain visible; no model was selected for matching
+GDPNow. GDPNow is a reference forecast, not evaluation truth.
+
+Implementation: `pit_foundation.py`, `pit_models.py`, `pit_benchmark.py`, new
+`pit_freshness.py`; sync, freshness, fixture-capture and backtest CLIs; two
+explicit data specifications; foundation/nowcast tests and CI; README and
+data/model/protocol documentation. Portable outcome tables are
+`docs/audit_nowcast_*.csv`. Full local artifacts are under
+`results/pit_nowcast_2026q3_20260906/`: `freshness_final`, `final_panel`,
+`historical_2019_admitted`, comparison runs, diagnostic failures and saved
+commands. Weights, databases and attachments remain uncommitted local artifacts.
+
+**Judgment:** successful admitted rows satisfy the conservative data/checkpoint
+availability contract for retrospective out-of-sample experiments. The expanded
+data is fresh relative to ALFRED at the stated cutoff, but the forecasts still
+omit some timely inputs (notably the collected advance inventory events and
+unavailable ISM data). Monthly slots preserve information; they do not solve
+historical-versus-current ragged-edge training mismatch. A proper historical
+release-event design and prospective or held-out evaluation are still needed.
+An unqualified claim of true historically issued/preregistered PIT forecasts,
+complete GDPNow/NY Fed coverage, or improved forecasting accuracy is not justified.
+
 ## Remaining limitations and tradeoffs
 
 1. **Archive fidelity and timing:** ALFRED can correct historical archives; date-level releases cannot resolve intraday order. Excluding all same-day values sacrifices timeliness but avoids inventing it. Refresh/replay lookbacks do not discover arbitrary corrections years outside the lookback; periodic full revalidation is needed. Conflicting same-key corrections intentionally require investigation/rebuilding a new store.

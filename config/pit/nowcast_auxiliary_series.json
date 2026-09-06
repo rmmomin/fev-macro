@@ -1,0 +1,21 @@
+{
+  "GDPC1": {
+    "frequency": "Q"
+  },
+  "A261RX1Q020SBEA": {
+    "frequency": "Q",
+    "tcode": 5
+  },
+  "ULCNFB": {
+    "frequency": "Q",
+    "tcode": 5
+  },
+  "AMINVTS": {
+    "frequency": "M",
+    "tcode": 1
+  },
+  "ARINVTS": {
+    "frequency": "M",
+    "tcode": 1
+  }
+}

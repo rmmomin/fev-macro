@@ -323,7 +323,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--qd_template", type=str, default=DEFAULT_QD_TEMPLATE)
     p.add_argument("--universe", type=str, choices=["md", "qd", "both"], default="both")
 
-    p.add_argument("--series", nargs="+", help="Explicit FRED IDs; bypass present-day template universes.")
+    series = p.add_mutually_exclusive_group()
+    series.add_argument("--series", nargs="+", help="Exact FRED IDs; no alias substitution.")
+    series.add_argument("--series-specs", help="Explicit frequency/ID JSON; refuse API frequency mismatches.")
     p.add_argument("--series_limit", type=int, default=None, help="Debug cap on number of template variables.")
     p.add_argument("--backfill_missing", action=argparse.BooleanOptionalAction, default=True)
 
@@ -345,6 +347,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    specs = json.loads(Path(args.series_specs).read_text()) if args.series_specs else {}
+    if args.series_specs:
+        if not specs or any(v.get('frequency') not in {'M', 'Q'} for v in specs.values()):
+            raise PITError('Explicit monthly/quarterly series specifications required')
+        args.series = list(dict.fromkeys(v.get('series_id', k) for k, v in specs.items()))
+    frequencies = {v.get('series_id', k): v['frequency'] for k, v in specs.items()}
     api_key = resolve_api_key(args)
     stats = APIStats()
     started = time.time()
@@ -376,10 +384,23 @@ def main() -> int:
 
     for uni, var in variables:
         try:
-            sid = existing_aliases.get(uni, {}).get(var)
-            if sid:
-                alias_cache_hits += 1
+            sid = None
+            if args.series:
+                # An explicit ID is a benchmark definition, never an alias search.
+                meta = fred_series_meta(series_id=var, api_key=api_key, args=args,
+                                        rate_limiter=rate_limiter, stats=stats)
+                if not meta or meta.get('id') != var:
+                    raise PITError(f'Exact FRED series unavailable: {var}')
+                if var in frequencies and meta['frequency_short'] != frequencies[var]:
+                    raise PITError(f'Native frequency mismatch for {var}')
+                sid = var
+                store.upsert_series_meta(series_id=sid, meta=meta)
+                alias_api_resolves += 1
             else:
+                sid = existing_aliases.get(uni, {}).get(var)
+            if sid and not args.series:
+                alias_cache_hits += 1
+            elif not sid:
                 sid = resolve_variable_to_series_id(
                     variable_name=var,
                     api_key=api_key,

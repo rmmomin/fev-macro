@@ -47,6 +47,27 @@ python scripts/run_pit_backtest.py \
 
 Use `--on-model-error record` to retain explicit failed/unsupported rows instead of aborting. The default production-use mode refuses restricted checkpoints; specifying research use is not permission to use those outputs commercially or in production. Each forecast retains its underlying data ledger, checkpoint evidence and runtime configuration. No Q3 accuracy score is possible before the GDP releases exist.
 
+## Preserve individual months
+
+Add `--foundation-features monthly_slots` to use separate month-1, month-2 and
+month-3 values, each with a missing indicator, in `tabpfn_bridge` and
+`chronos2_covariates`. Transformations run on the complete native monthly
+calendar before training-window selection. January log growth uses December;
+a missing February prevents computing March growth from January. Quarterly
+covariates stay in a single quarterly channel. Missing observations remain NaN.
+
+For example, a Q3 origin with only July employment available gets July's value
+in `PAYEMS__m1`, unknown values in `__m2` and `__m3`, and matching masks. August
+employment enters only after its actual vintage date passes the cutoff. GDP
+remains quarterly. These are aligned mixed-frequency features, not monthly GDP
+interpolation or a native mixed-frequency measurement equation.
+
+The default `quarterly` representation retains the earlier experiment for
+controlled comparisons. Other models keep their existing input contracts.
+The representation, column order, feature hashes and actual future-quarter
+feature values appear in every affected model's audit; the CSV records the
+representation as well. See [the expanded data collection](nowcast_data.md).
+
 ## Tests and scope
 
 `python -m pytest tests/test_pit_foundation.py -q` runs synthetic checkpoint/recording-backend contract tests without downloading model weights. These test that future revisions and same-day releases cannot enter any adapter, that only training rows fit the TabPFN bridge, that Chronos preserves missing features, and that GDP-only adapters ignore macro inputs. Such tests validate the adapter contract, not pretrained-model accuracy.

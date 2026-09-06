@@ -50,6 +50,7 @@ class ModelData:
     origin: str | None = None
     foundation_checkpoints: dict[str, str] | None = None
     model_use: str = "production"
+    foundation_features: str = "quarterly"
 
     @property
     def g(self):

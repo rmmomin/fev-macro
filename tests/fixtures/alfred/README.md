@@ -11,3 +11,17 @@ JSON records contain sanitized request parameters, exact decoded official API re
 `release_calendar.csv` has sourced BEA stage labels and published rounded SAAR values. `origins.csv` fixes the 25th of April/July/October/January for 2019Q1–Q4, independent of the eventually realized release day. `series_specs.json` fixes the GDP/UNRATE identity, frequencies and UNRATE level transformation. All choices are a retrospective test specification, not evidence of historical preregistration.
 
 For April 26 snapshots ALFRED reports both numerator and denominator with April 26 bounds, although the preceding quarter was originally released earlier. Bounds clipped by a query must never be mistaken for initial release dates.
+
+The ten `*_2026_intervals.json` fixtures were captured on September 6, 2026 from
+the official observations API with full real-time bounds. They cover exports,
+construction, durable inventories, JOLTS, monthly ADP employment, real GDI,
+unit labor costs, advance wholesale/retail inventories and vehicle sales.
+They retain exact decoded API responses and sanitized parameters. Tests assert
+same-day exclusion and next-day availability; durable inventory revisions also
+exercise the transition from the advance August 26 value to the September 2
+full-report value. `capture_alfred_fixtures.py` includes their explicit queries.
+
+Two additional `*_2026_snapshot.json` files preserve the complete September 5
+advance wholesale/retail inventory snapshots. Only June and July have numeric
+values; the earlier periods are missing. They guard against assuming that a
+long list of observation dates means a usable historical training series.

@@ -55,26 +55,66 @@ def _checkpoint(name, d):
 
 
 def _features(d):
+    """An explicit regular quarterly design; monthly slots retain calendar position.
+
+    Raw observations already come from the verified origin snapshot. Transform
+    on the complete native calendar BEFORE slicing the training window. Never
+    fill unpublished months, interpolate GDP, or compress gaps in that calendar.
+    """
     expected = pd.period_range(d.y.index[1], d.y.index[-1] + d.steps, freq='Q-DEC')
     columns = [*d.covariates, *[v + suffix for v in d.covariates for suffix in ('__count', '__missing')]]
     if not d.features.index.equals(expected) or list(d.features.columns) != columns:
         raise PITError('Foundation covariates must have explicit aligned quarters, counts and missing indicators')
-    f = d.features.to_numpy(float)
-    if np.isinf(f).any():
-        raise PITError('Infinite foundation feature')
     if not d.covariates:
         raise UnsupportedModel('Verified covariates are required')
-    return f
+    if d.foundation_features == 'quarterly':
+        frame = d.features.copy()
+    elif d.foundation_features == 'monthly_slots':
+        from .fred_transforms import fred_transform
+        frame = pd.DataFrame(index=expected)
+        for variable in d.covariates:
+            records = [v for v in d.metadata.get('inputs', []) if v['variable'] == variable]
+            if not records:
+                raise UnsupportedModel(f'No verified native observations for {variable}')
+            specs = {(r['frequency'], r['tcode']) for r in records}
+            if len(specs) != 1:
+                raise PITError(f'Inconsistent native specification for {variable}')
+            frequency, code = specs.pop()
+            if frequency not in {'M', 'Q'}:
+                raise UnsupportedModel(f'Unsupported native frequency for {variable}')
+            cutoff = d.metadata['information_cutoff']
+            if any(r['vintage_date'] > cutoff or r['obs_date'] > cutoff for r in records):
+                raise PITError('Native features exceed the information cutoff')
+            native = pd.Series([r['value'] for r in records],
+                index=pd.PeriodIndex([r['obs_date'] for r in records], freq=frequency), dtype=float).sort_index()
+            if native.index.has_duplicates:
+                raise PITError(f'Duplicate native period for {variable}')
+            native = native.reindex(pd.period_range(native.index.min(), native.index.max(), freq=frequency))
+            transformed = fred_transform(native, code)
+            for slot in range(1, 4) if frequency == 'M' else [0]:
+                periods = expected.asfreq('M', how='start') + slot - 1 if slot else expected
+                name = f'{variable}__m{slot}' if slot else f'{variable}__q'
+                frame[name] = transformed.reindex(periods).to_numpy()
+                frame[name + '__missing'] = frame[name].isna().astype(float)
+    else:
+        raise PITError('Unknown foundation feature representation')
+    if np.isinf(frame.to_numpy(float)).any():
+        raise PITError('Infinite foundation feature')
+    return frame
 
 
-def _frame_evidence(d, f):
-    return dict(feature_columns=list(d.features.columns),
-                feature_quarters=d.features.index.astype(str).tolist(),
+def _frame_evidence(d, frame):
+    f = frame.to_numpy(float)
+    return dict(feature_representation=d.foundation_features, feature_columns=list(frame.columns),
+                feature_quarters=frame.index.astype(str).tolist(),
                 feature_sha256=_array_hash(f),
                 context_feature_sha256=_array_hash(f[:len(d.g)]),
-                forecast_features=d.features.iloc[len(d.g):].astype(object).where(
-                    d.features.iloc[len(d.g):].notna(), None).to_dict(orient='list'),
-                covariate_rule='origin snapshot partial-quarter summaries, counts and missing indicators; no future releases')
+                forecast_features=frame.iloc[len(d.g):].astype(object).where(
+                    frame.iloc[len(d.g):].notna(), None).to_dict(orient='list'),
+                covariate_rule=('native transformation then calendar month 1/2/3 values and missing indicators; '
+                    'quarterly covariates remain quarterly; no filling or future releases'
+                    if d.foundation_features == 'monthly_slots' else
+                    'origin snapshot partial-quarter summaries, counts and missing indicators; no future releases'))
 
 
 def _tabpfn_config(directory, name, seed):
@@ -85,7 +125,8 @@ def _tabpfn_config(directory, name, seed):
 
 def _tabpfn_bridge(d, directory):
     from tabpfn import TabPFNRegressor
-    f, lags = _features(d), 4
+    frame, lags = _features(d), 4
+    f = frame.to_numpy(float)
     x, target = _supervised(d.g, f, lags)
     params = _tabpfn_config(directory, 'tabpfn_bridge', d.seed)
     estimator = TabPFNRegressor(**params).fit(x, target)
@@ -100,7 +141,7 @@ def _tabpfn_bridge(d, directory):
         fit_target='quarterly log GDP growth', point_statistic='median',
         training_design_sha256=_array_hash(x), training_target_sha256=_array_hash(target),
         preprocessing='TabPFN preprocessing fitted on training rows; no external scaling or imputation',
-        **_frame_evidence(d, f))
+        **_frame_evidence(d, frame))
 
 
 def _tabpfn_ts(d, directory):
@@ -129,10 +170,11 @@ def _tabpfn_ts(d, directory):
 
 def chronos_covariate_task(d):
     """Quarterly growth and origin-known features on both sides of last GDP release."""
-    f, n = _features(d), len(d.g)
+    frame, n = _features(d), len(d.g)
+    f = frame.to_numpy(float)
     return dict(target=d.g.astype(np.float32),
-        past_covariates={c: f[:n, i].astype(np.float32) for i, c in enumerate(d.features)},
-        future_covariates={c: f[n:, i].astype(np.float32) for i, c in enumerate(d.features)}), f
+        past_covariates={c: f[:n, i].astype(np.float32) for i, c in enumerate(frame)},
+        future_covariates={c: f[n:, i].astype(np.float32) for i, c in enumerate(frame)}), frame
 
 
 def _chronos_covariates(d, directory):
@@ -143,7 +185,7 @@ def _chronos_covariates(d, directory):
     path = quantiles[0][0, :, 0].numpy(force=True)
     return path, dict(fit_target='quarterly log GDP growth', point_statistic='median', zero_shot=True,
                      context_length=len(d.g), context_sha256=_array_hash(task['target']),
-                     alignment='quarterly summaries; not a native mixed-frequency state-space model',
+                     alignment='quarterly target grid with explicit origin-known covariate channels',
                      **_frame_evidence(d, f))
 
 

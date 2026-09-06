@@ -34,6 +34,15 @@ def main() -> None:
         "gdpc1_on_advance": dict(series_id="GDPC1", observation_start="2018-10-01", observation_end="2019-01-01",
                                 realtime_start="2019-04-26", realtime_end="2019-04-26"),
     }
+    for sid in ('BOPTEXP', 'TTLCONS', 'AMDMTI', 'JTSJOL', 'ADPMNUSNERSA',
+                'A261RX1Q020SBEA', 'ULCNFB', 'AMINVTS', 'ARINVTS', 'TOTALSA'):
+        queries[sid.lower() + '_2026_intervals'] = dict(series_id=sid,
+            observation_start='2026-04-01' if sid in {'A261RX1Q020SBEA', 'ULCNFB'} else '2026-07-01',
+            observation_end='2026-08-01', realtime_start='1776-07-04', realtime_end='9999-12-31')
+    for sid in ('AMINVTS', 'ARINVTS'):
+        queries[sid.lower() + '_2026_snapshot'] = dict(series_id=sid,
+            observation_start='2005-01-01', observation_end='2026-09-05',
+            realtime_start='2026-09-05', realtime_end='2026-09-05')
     for name, query in queries.items():
         params = dict(query, output_type=1, units="lin", limit=100000, offset=0, sort_order="asc")
         payload = fred_series_observations(series_id=query["series_id"], api_key=key, args=args,
