@@ -1,0 +1,71 @@
+{
+  "validated_at_utc": "2026-09-21T00:20:38.610877+00:00",
+  "all_passed": true,
+  "status": "passed",
+  "origin": "2026-09-20",
+  "information_cutoff": "2026-09-19",
+  "target_quarter": "2026Q3",
+  "run_root": "results/pit_nowcast_2026q3_20260920",
+  "scope": "Portable artifact integrity, data cutoff, provenance, freshness and SAAR arithmetic; not forecast accuracy",
+  "checks": [
+    {
+      "name": "complete_catalog",
+      "passed": true
+    },
+    {
+      "name": "forecast_only_configuration",
+      "passed": true
+    },
+    {
+      "name": "manifest_and_audit_hashes",
+      "passed": true
+    },
+    {
+      "name": "all_origin_cutoffs_and_provenance",
+      "passed": true
+    },
+    {
+      "name": "qoq_saar_and_gdp_level_arithmetic",
+      "passed": true
+    },
+    {
+      "name": "independent_freshness_evidence",
+      "passed": true
+    },
+    {
+      "name": "model_inputs_match_verified_snapshot",
+      "passed": true
+    }
+  ],
+  "details": {
+    "complete_catalog": {
+      "models": 32,
+      "successful": 32,
+      "target": "2026Q3",
+      "cutoff": "2026-09-19"
+    },
+    "manifest_and_audit_hashes": {
+      "audits_including_repeated_nested": 17,
+      "unique_audits": 9
+    },
+    "all_origin_cutoffs_and_provenance": {
+      "exported_response_records": 84,
+      "input_records_checked": 171343
+    },
+    "qoq_saar_and_gdp_level_arithmetic": {
+      "q2_gdp_same_vintage": [
+        24269.613
+      ],
+      "max_absolute_saar_difference": 6.394884621840902e-14,
+      "formula": "100 * ((Q3 forecast GDP / same-vintage Q2 GDP) ** 4 - 1)"
+    },
+    "independent_freshness_evidence": {
+      "series_checked": 46,
+      "all_fresh": true,
+      "evidence_pages": 46
+    },
+    "model_inputs_match_verified_snapshot": {
+      "model_series_compared": 42
+    }
+  }
+}

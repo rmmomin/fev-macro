@@ -4,6 +4,10 @@ US real-GDP forecasting research with a strict point-in-time model catalog and e
 
 **The previous “vintage-correct by default” claim was not supported.** The audit found current-FRED history backdated to observation dates, missing historical values filled from later panels, ambiguous archive dates, and ex-post model selection. These outputs are not validated historical forecasts. See [AUDIT.md](AUDIT.md) for findings, fixes, tests, and remaining limits.
 
+## Latest nowcasts
+
+The [September 20, 2026 Q3 nowcast report](docs/nowcasts/2026q3_20260920/README.md) contains all 32 model forecasts, the comparison with September 6, and data freshness/validation summaries. It uses information through September 19; all forecasts are real GDP growth in q/q SAAR percent.
+
 ## Strict benchmark
 
 A forecast dated `D` uses ALFRED vintages dated **before D**, interpreting dates in America/New_York. Same-day releases are excluded even for an afternoon forecast because ALFRED has no intraday availability timestamps. Observation dates identify the period measured, not when its value became known.

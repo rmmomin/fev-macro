@@ -1,0 +1,15 @@
+[
+  ".venv/bin/python",
+  "-u",
+  "scripts/check_pit_freshness.py",
+  "--db",
+  "data/realtime/pit_nowcast_2026q3_20260920.duckdb",
+  "--series-specs",
+  "results/pit_nowcast_2026q3_20260920/collection_specs.json",
+  "--origin",
+  "2026-09-20",
+  "--observation-start",
+  "2005-01-01",
+  "--out",
+  "results/pit_nowcast_2026q3_20260920/freshness"
+]

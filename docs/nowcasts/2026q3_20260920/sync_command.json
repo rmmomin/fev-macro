@@ -1,0 +1,17 @@
+[
+  ".venv/bin/python",
+  "-u",
+  "scripts/sync_alfred_asof_store.py",
+  "--db",
+  "data/realtime/pit_nowcast_2026q3_20260920.duckdb",
+  "--series-specs",
+  "results/pit_nowcast_2026q3_20260920/collection_specs.json",
+  "--observation_start",
+  "2005-01-01",
+  "--observation_end",
+  "2026-09-19",
+  "--backfill_realtime_end",
+  "2026-09-19",
+  "--report_json",
+  "results/pit_nowcast_2026q3_20260920/sync.json"
+]

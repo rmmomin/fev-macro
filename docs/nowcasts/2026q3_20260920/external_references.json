@@ -1,0 +1,16 @@
+{
+  "gdpnow": {
+    "target_quarter": "2026Q3",
+    "g_hat_saar": 5.1,
+    "publication_date": "2026-09-17",
+    "source_url": "https://www.atlantafed.org/research-and-data/data/gdpnow",
+    "role": "External reference only; never used as a training target or model selection criterion"
+  },
+  "bea_advance_release": {
+    "target_quarter": "2026Q3",
+    "scheduled_date": "2026-10-29",
+    "scheduled_time": "08:30 America/New_York",
+    "source_url": "https://www.bea.gov/news/schedule"
+  },
+  "accessed_on_new_york": "2026-09-20"
+}

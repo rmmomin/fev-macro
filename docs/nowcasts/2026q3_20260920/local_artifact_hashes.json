@@ -1,0 +1,41 @@
+{
+  "hash_algorithm": "SHA-256 over exact file bytes",
+  "artifacts": [
+    {
+      "path": "results/pit_nowcast_2026q3_20260920/final_panel/audit.json",
+      "bytes": 88435702,
+      "sha256": "6d799e3899310bc9247c7031c2e5541259aca0b051d4db42d8cb201e6053323a",
+      "committed": false
+    },
+    {
+      "path": "results/pit_nowcast_2026q3_20260920/final_panel/api_responses.json",
+      "bytes": 19895440,
+      "sha256": "1a6d881e022aabe7ea97cfc17b7599d1ee66dc1487030b83c3a3aee10d4619aa",
+      "committed": false
+    },
+    {
+      "path": "results/pit_nowcast_2026q3_20260920/freshness/api_responses.json",
+      "bytes": 1836006,
+      "sha256": "c1bc3f6d91eeef74077646e415806667f65aff4ba690cf042e6fccc4c82bd3fb",
+      "committed": false
+    },
+    {
+      "path": "results/pit_nowcast_2026q3_20260920/inputs_asof.csv",
+      "bytes": 1484294,
+      "sha256": "b1c0ad086f1fa97feacebcf9c1cee966af9c7cc2167b854b8f039e93bc067a1b",
+      "committed": false
+    },
+    {
+      "path": "results/pit_nowcast_2026q3_20260920/validate_run.py",
+      "bytes": 17014,
+      "sha256": "f09e41d7574ceb5c20b9eea8bed045528daf08620f8c58247cace45ff6d1c606",
+      "committed": false
+    },
+    {
+      "path": "data/realtime/pit_nowcast_2026q3_20260920.duckdb",
+      "bytes": 61091840,
+      "sha256": "acea02643e64ab3ed5b37903b8b5e555461953851a790439c80404987ffaf893",
+      "committed": false
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "alias_resolution": {
+    "alias_api_resolves": 46,
+    "alias_cache_hits": 0
+  },
+  "api_stats": {
+    "effective_min_elapsed_seconds": 50.6,
+    "endpoint_counts": {
+      "/series": 46,
+      "/series/observations": 46
+    },
+    "http_429": 0,
+    "http_5xx": 0,
+    "min_request_interval_seconds": 0.55,
+    "retries": 0,
+    "total_requests": 92
+  },
+  "db": "data/realtime/pit_nowcast_2026q3_20260920.duckdb",
+  "failures": {},
+  "failures_count": 0,
+  "generated_at_utc": "2026-09-21T00:18:35.947329+00:00",
+  "pit_policy": "verified_ALFRED_intervals_only; same-day vintages excluded",
+  "resolved_unique_series": 46,
+  "resolved_variables": 46,
+  "runtime_seconds": 52.32054805755615,
+  "universe": "both"
+}
